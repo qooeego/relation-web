@@ -90,7 +90,28 @@ export default function App() {
           ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
           ctx.fill();
         }}
-      />
+      /><a
+  href="https://www.buymeacoffee.com/qooeego"
+  target="_blank"
+  rel="noopener noreferrer"
+  style={{
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    zIndex: 2,
+    backgroundColor: '#ffdd00',
+    padding: '10px 16px',
+    borderRadius: '8px',
+    color: '#000',
+    fontWeight: 'bold',
+    textDecoration: 'none',
+    boxShadow: '0px 2px 6px rgba(0,0,0,0.3)'
+  }}
+>
+  ☕ 請我喝杯咖啡
+</a>
+
     </div>
+    
   );
 }
