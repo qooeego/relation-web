@@ -5,6 +5,7 @@ export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [keyword, setKeyword] = useState('狗');
   const [loading, setLoading] = useState(false);
+  const [history, setHistory] = useState([]); // 加入歷史堆疊
 
   const fetchGraph = async (centerWord) => {
     setLoading(true);
@@ -45,6 +46,15 @@ export default function App() {
     setKeyword(node.id);
   };
 
+  const handleBack = () => {
+  if (history.length === 0) return;
+  const lastKeyword = history[history.length - 1];
+  setHistory((prev) => prev.slice(0, -1)); // pop 最後一筆
+  fetchGraph(lastKeyword);
+  setKeyword(lastKeyword);
+};
+
+
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
       <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, background: 'rgba(255,255,255,0.8)', padding: 10, borderRadius: 8 }}>
@@ -58,7 +68,15 @@ export default function App() {
           onClick={() => fetchGraph(keyword)}
           style={{ marginLeft: '1rem', padding: '0.5rem 1rem' }}
         >
-          探索
+          探索  
+        <button
+  onClick={handleBack}
+  disabled={history.length === 0}
+  style={{ marginLeft: '0.5rem', padding: '0.5rem 1rem' }}
+>
+  ⬅ 返回
+</button>
+
         </button>
         {loading && <div style={{ marginTop: 10 }}>⏳ 載入中...</div>}
       </div>
