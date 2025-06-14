@@ -5,11 +5,10 @@ export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [keyword, setKeyword] = useState('狗');
   const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState([]); // 加入歷史堆疊
+  const [history, setHistory] = useState([]);
 
   const fetchGraph = async (centerWord) => {
     setLoading(true);
-
     try {
       const res = await fetch(`https://api.conceptnet.io/c/zh/${encodeURIComponent(centerWord)}`);
       const data = await res.json();
@@ -17,7 +16,7 @@ export default function App() {
       const related = data.edges
         .map((edge) => edge.end?.label || edge.end?.term)
         .filter((term) => term && term !== centerWord)
-        .slice(0, 12); // 調整節點數讓圖不擠
+        .slice(0, 12);
 
       const newNodes = [
         { id: centerWord, main: true },
@@ -30,34 +29,33 @@ export default function App() {
       }));
 
       setGraphData({ nodes: newNodes, links: newLinks });
+      setKeyword(centerWord); // ❗放這裡：更新狀態
     } catch (e) {
       console.error('探索失敗', e);
     }
-
     setLoading(false);
   };
 
   useEffect(() => {
-    fetchGraph(keyword);
+    fetchGraph(keyword); // 初始讀取
   }, []);
 
   const handleClickNode = (node) => {
+    setHistory((prev) => [...prev, keyword]); // ✅ 正確：記下當前詞，再前往新詞
     fetchGraph(node.id);
-    setKeyword(node.id);
   };
 
   const handleBack = () => {
-  if (history.length === 0) return;
-  const lastKeyword = history[history.length - 1];
-  setHistory((prev) => prev.slice(0, -1)); // pop 最後一筆
-  fetchGraph(lastKeyword);
-  setKeyword(lastKeyword);
-};
-
+    if (history.length === 0) return;
+    const prevKeyword = history[history.length - 1];
+    setHistory((prevHist) => prevHist.slice(0, -1)); // pop 掉最後一筆
+    fetchGraph(prevKeyword);
+  };
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
-      <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, background: 'rgba(255,255,255,0.8)', padding: 10, borderRadius: 8 }}>
+      {/* 🔍 輸入欄區塊 */}
+      <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20 }}>
         <input
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
@@ -68,19 +66,19 @@ export default function App() {
           onClick={() => fetchGraph(keyword)}
           style={{ marginLeft: '1rem', padding: '0.5rem 1rem' }}
         >
-          探索  
+          探索
+        </button>
         <button
-  onClick={handleBack}
-  disabled={history.length === 0}
-  style={{ marginLeft: '0.5rem', padding: '0.5rem 1rem' }}
->
-  ⬅ 返回
-</button>
-
+          onClick={handleBack}
+          disabled={history.length === 0}
+          style={{ marginLeft: '1rem', padding: '0.5rem 1rem' }}
+        >
+          ⬅️ 返回
         </button>
         {loading && <div style={{ marginTop: 10 }}>⏳ 載入中...</div>}
       </div>
 
+      {/* 🌐 視覺圖區塊 */}
       <ForceGraph2D
         graphData={graphData}
         nodeLabel="id"
@@ -108,28 +106,26 @@ export default function App() {
           ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
           ctx.fill();
         }}
-      /><a
-  href="https://www.buymeacoffee.com/qooeego"
-  target="_blank"
-  rel="noopener noreferrer"
-  style={{
-    position: 'absolute',
-    bottom: 20,
-    right: 20,
-    zIndex: 2,
-    backgroundColor: '#ffdd00',
-    padding: '10px 16px',
-    borderRadius: '8px',
-    color: '#000',
-    fontWeight: 'bold',
-    textDecoration: 'none',
-    boxShadow: '0px 2px 6px rgba(0,0,0,0.3)'
-  }}
->
-  ☕ 請我喝杯咖啡
-</a>
+      />
 
+      {/* ☕ 打賞按鈕 */}
+      <a
+        href="https://www.buymeacoffee.com/qooeego"
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{
+          position: 'absolute',
+          right: 20,
+          bottom: 20,
+          zIndex: 1,
+        }}
+      >
+        <img
+          src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png"
+          alt="Buy Me A Coffee"
+          style={{ height: '50px', width: '180px' }}
+        />
+      </a>
     </div>
-    
   );
 }
