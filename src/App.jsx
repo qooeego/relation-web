@@ -12,14 +12,9 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [showPanel, setShowPanel] = useState(false);
   const fgRef = useRef();
-  const canvasRef = useRef();
 
-  const userData = useRef(
-    JSON.parse(localStorage.getItem('userGraphData') || '{}')
-  );
-  const deletedData = useRef(
-    JSON.parse(localStorage.getItem('deletedGraphData') || '{}')
-  );
+  const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
+  const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
 
   const fetchGraph = async (centerWord) => {
     setLoading(true);
@@ -36,7 +31,7 @@ export default function App() {
           return (
             endLabel &&
             endLabel !== centerWord &&
-            /^[\u4e00-\u9fa5]+$/.test(endLabel) && // 排除非中文
+            /^[一-龥]+$/.test(endLabel) &&
             !deletedTerms.has(endLabel)
           );
         })
@@ -85,7 +80,7 @@ export default function App() {
     fetchGraph(keyword);
   }, []);
 
-  const handleClickNode = (node, event) => {
+  const handleClickNode = (node) => {
     if (addMode) return;
     setHistory((prev) => [...prev, keyword]);
     fetchGraph(node.id);
@@ -157,7 +152,7 @@ export default function App() {
         <button
           onClick={() => setShowPanel(!showPanel)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#888', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-        >📌 編輯區</button>
+        >{showPanel ? '▶️ 收起編輯區' : '📌 編輯區'}</button>
       </div>
 
       <ForceGraph2D
@@ -173,22 +168,26 @@ export default function App() {
         d3Force="charge"
         d3ForceConfig={{ charge: -250 }}
         nodeCanvasObject={(node, ctx, globalScale) => {
-          if (!node || node.x == null || node.y == null) return;
-          const label = node.id;
-          const fontSize = (node.main ? 16 : 12) / globalScale;
-          ctx.font = `${fontSize}px sans-serif`;
-          ctx.fillStyle = node.main ? 'red' : 'black';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(label, node.x, node.y);
+          try {
+            if (!node || node.x == null || node.y == null || isNaN(node.x) || isNaN(node.y)) return;
+            const label = node.id;
+            const fontSize = (node.main ? 16 : 12) / globalScale;
+            ctx.font = `${fontSize}px sans-serif`;
+            ctx.fillStyle = node.main ? 'red' : 'black';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, node.x, node.y);
+          } catch {}
         }}
         nodePointerAreaPaint={(node, color, ctx) => {
-          if (!node || node.x == null || node.y == null) return;
-          ctx.fillStyle = color;
-          const size = node.main ? 20 : 10;
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
-          ctx.fill();
+          try {
+            if (!node || node.x == null || node.y == null || isNaN(node.x) || isNaN(node.y)) return;
+            ctx.fillStyle = color;
+            const size = node.main ? 20 : 10;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
+            ctx.fill();
+          } catch {}
         }}
       />
 
@@ -204,7 +203,7 @@ export default function App() {
       )}
 
       {showPanel && (
-        <div style={{ position: 'absolute', top: 60, right: 0, width: '80vw', maxWidth: 300, background: '#fff', padding: 8, borderRadius: '8px 0 0 8px', maxHeight: '70vh', overflowY: 'auto' }}>
+        <div style={{ position: 'absolute', top: 60, right: 0, width: '33vw', maxWidth: 300, background: '#fff', padding: 8, borderRadius: '8px 0 0 8px', maxHeight: '70vh', overflowY: 'auto', overflowX: 'auto' }}>
           <strong>關鍵詞：</strong>{keyword}
           <div style={{ marginTop: 8 }}>
             {allLinks.map((term) => (
@@ -220,7 +219,7 @@ export default function App() {
       <a
         href="https://www.buymeacoffee.com/qooeego"
         target="_blank"
-        style={{ position: 'absolute', bottom: 16, right: 16, textDecoration: 'none', fontSize: 14, background: '#ffdd00', padding: '6px 12px', borderRadius: '6px', color: '#000' }}
+        style={{ position: 'absolute', bottom: 16, right: 16, textDecoration: 'none', fontSize: 16, fontWeight: 'bold', background: '#ffdd00', padding: '6px 12px', borderRadius: '6px', color: '#000' }}
       >☕ Buy Me a Coffee</a>
     </div>
   );
