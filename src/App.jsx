@@ -5,16 +5,20 @@ export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [keyword, setKeyword] = useState('狗');
   const [loading, setLoading] = useState(false);
-  const [addMode, setAddMode] = useState(null);
-  const [inputPos, setInputPos] = useState(null);
+  const [addMode, setAddMode] = useState(false);
+  const [inputPos, setInputPos] = useState({ x: window.innerWidth / 2 - 100, y: 150 });
   const [inputValue, setInputValue] = useState('');
-  const [customLinks, setCustomLinks] = useState([]);
+  const [allLinks, setAllLinks] = useState([]);
   const [history, setHistory] = useState([]);
+  const [showPanel, setShowPanel] = useState(false);
   const fgRef = useRef();
   const canvasRef = useRef();
 
   const userData = useRef(
     JSON.parse(localStorage.getItem('userGraphData') || '{}')
+  );
+  const deletedData = useRef(
+    JSON.parse(localStorage.getItem('deletedGraphData') || '{}')
   );
 
   const fetchGraph = async (centerWord) => {
@@ -23,20 +27,54 @@ export default function App() {
       const res = await fetch(`https://api.conceptnet.io/c/zh/${encodeURIComponent(centerWord)}`);
       const data = await res.json();
 
-      const relatedRaw = data.edges
-        .map((edge) => edge.end?.label || edge.end?.term)
-        .filter((term) => term && term !== centerWord);
-
       const customTerms = userData.current[centerWord] || [];
-      const allRelated = Array.from(new Set([...relatedRaw, ...customTerms])).slice(0, 20);
+      const deletedTerms = new Set(deletedData.current[centerWord] || []);
+
+      const relatedEdges = data.edges
+        .filter((edge) => {
+          const endLabel = edge.end?.label || edge.end?.term;
+          return (
+            endLabel &&
+            endLabel !== centerWord &&
+            /^[\u4e00-\u9fa5]+$/.test(endLabel) && // 排除非中文
+            !deletedTerms.has(endLabel)
+          );
+        })
+        .slice(0, 20);
+
+      const allRelated = Array.from(
+        new Set([
+          ...relatedEdges.map((e) => e.end?.label || e.end?.term),
+          ...customTerms
+        ])
+      ).filter((term) => !deletedTerms.has(term));
 
       const newNodes = [
         { id: centerWord, main: true },
-        ...allRelated.map((r) => ({ id: r })),
+        ...allRelated.map((r) => ({ id: r }))
       ];
-      const newLinks = allRelated.map((r) => ({ source: centerWord, target: r }));
+
+      const newLinks = [
+        ...relatedEdges.map((edge) => ({
+          source: centerWord,
+          target: edge.end?.label || edge.end?.term,
+          weight: Math.max(1, edge.weight * 2)
+        })),
+        ...customTerms
+          .filter((term) => !deletedTerms.has(term))
+          .map((term) => ({
+            source: centerWord,
+            target: term,
+            weight: 4
+          }))
+      ];
+
       setGraphData({ nodes: newNodes, links: newLinks });
-      setCustomLinks(allRelated); // 顯示所有連結（不只自定）
+      setAllLinks(allRelated);
+
+      if (fgRef.current) {
+        fgRef.current.d3ReheatSimulation();
+      }
     } catch (e) {
       console.error('探索失敗', e);
     }
@@ -54,40 +92,35 @@ export default function App() {
     setKeyword(node.id);
   };
 
-  const handleCanvasClick = (event) => {
-    if (!addMode) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    setInputPos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
-  };
-
   const addCustomRelation = () => {
     if (!inputValue.trim()) return;
     const current = keyword;
     const newTerm = inputValue.trim();
 
     userData.current[current] = userData.current[current] || [];
-    userData.current[current].push(newTerm);
+    if (!userData.current[current].includes(newTerm)) {
+      userData.current[current].push(newTerm);
+    }
     localStorage.setItem('userGraphData', JSON.stringify(userData.current));
 
+    deletedData.current[current] = (deletedData.current[current] || []).filter(t => t !== newTerm);
+    localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
+
     setInputValue('');
-    setAddMode(null);
+    setAddMode(false);
     setInputPos(null);
     fetchGraph(current);
   };
 
   const deleteAnyRelation = (term) => {
     const current = keyword;
-    userData.current[current] = (userData.current[current] || []).filter((t) => t !== term);
-    localStorage.setItem('userGraphData', JSON.stringify(userData.current));
-    fetchGraph(current);
-  };
+    deletedData.current[current] = deletedData.current[current] || [];
+    if (!deletedData.current[current].includes(term)) {
+      deletedData.current[current].push(term);
+    }
+    localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
-  const handleStartAdd = (node, event) => {
-    event.stopPropagation();
-    const rect = event.target.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    setAddMode({ nodeId: node.id, x, y });
+    fetchGraph(current);
   };
 
   const handleBack = () => {
@@ -101,62 +134,30 @@ export default function App() {
 
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
-      <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, display: 'flex' }}>
+      <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
         <input
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
           placeholder="輸入關鍵字"
-          style={{
-            fontSize: '1rem',
-            padding: '0.5rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            outline: 'none'
-          }}
+          style={{ fontSize: '1rem', padding: '0.5rem', border: '1px solid #ccc', borderRadius: '4px', outline: 'none' }}
         />
         <button
           onClick={() => fetchGraph(keyword)}
-          style={{
-            marginLeft: '1rem',
-            padding: '0.5rem 1rem',
-            backgroundColor: '#4CAF50',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer'
-          }}
-        >
-          探索
-        </button>
+          style={{ padding: '0.5rem 1rem', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+        >探索</button>
         <button
           onClick={handleBack}
           disabled={history.length === 0}
-          style={{
-            marginLeft: '1rem',
-            padding: '0.5rem 1rem',
-            backgroundColor: history.length === 0 ? '#ccc' : '#2196F3',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: history.length === 0 ? 'not-allowed' : 'pointer'
-          }}
-        >
-          ← 返回
-        </button>
+          style={{ padding: '0.5rem 1rem', backgroundColor: history.length === 0 ? '#ccc' : '#2196F3', color: 'white', border: 'none', borderRadius: '4px', cursor: history.length === 0 ? 'not-allowed' : 'pointer' }}
+        >← 返回</button>
         <button
           onClick={() => setAddMode(true)}
-          style={{
-            marginLeft: '1rem',
-            padding: '0.5rem 1rem',
-            backgroundColor: '#f39c12',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer'
-          }}
-        >
-          ➕ 新增關聯
-        </button>
+          style={{ padding: '0.5rem 1rem', backgroundColor: '#f39c12', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+        >➕ 新增關聯</button>
+        <button
+          onClick={() => setShowPanel(!showPanel)}
+          style={{ padding: '0.5rem 1rem', backgroundColor: '#888', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+        >📌 編輯區</button>
       </div>
 
       <ForceGraph2D
@@ -164,7 +165,7 @@ export default function App() {
         graphData={graphData}
         nodeLabel="id"
         onNodeClick={handleClickNode}
-        linkDistance={180}
+        linkDistance={(link) => 300 / Math.pow(link.weight || 1, 1.5)}
         cooldownTicks={80}
         enableNodeDrag
         enableZoomInteraction
@@ -172,6 +173,7 @@ export default function App() {
         d3Force="charge"
         d3ForceConfig={{ charge: -250 }}
         nodeCanvasObject={(node, ctx, globalScale) => {
+          if (!node || node.x == null || node.y == null) return;
           const label = node.id;
           const fontSize = (node.main ? 16 : 12) / globalScale;
           ctx.font = `${fontSize}px sans-serif`;
@@ -181,79 +183,45 @@ export default function App() {
           ctx.fillText(label, node.x, node.y);
         }}
         nodePointerAreaPaint={(node, color, ctx) => {
+          if (!node || node.x == null || node.y == null) return;
           ctx.fillStyle = color;
           const size = node.main ? 20 : 10;
           ctx.beginPath();
           ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
           ctx.fill();
         }}
-        onNodeRightClick={handleStartAdd}
       />
 
-      <div
-        ref={canvasRef}
-        onClick={handleCanvasClick}
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          width: '100%',
-          height: '100%',
-          pointerEvents: addMode ? 'auto' : 'none',
-        }}
-      >
-        {inputPos && (
-          <input
-            style={{
-              position: 'absolute',
-              left: inputPos.x,
-              top: inputPos.y,
-              fontSize: '16px',
-              padding: '4px',
-              zIndex: 10,
-              border: '1px solid #ccc',
-              borderRadius: '4px'
-            }}
-            autoFocus
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addCustomRelation();
-            }}
-            placeholder="輸入新詞按 Enter"
-          />
-        )}
-      </div>
+      {addMode && (
+        <input
+          style={{ position: 'absolute', left: inputPos.x, top: inputPos.y, fontSize: '16px', padding: '4px', zIndex: 10, border: '1px solid #ccc', borderRadius: '4px' }}
+          autoFocus
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') addCustomRelation(); }}
+          placeholder="輸入新詞按 Enter"
+        />
+      )}
 
-      <div style={{ position: 'absolute', top: 12, right: 12, background: '#fff', padding: 8, borderRadius: 4 }}>
-        <strong>關鍵詞：</strong>{keyword}
-        <div style={{ marginTop: 8 }}>
-          {customLinks.map((term) => (
-            <div key={term} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span>{term}</span>
-              <button onClick={() => deleteAnyRelation(term)} style={{ marginLeft: 8 }}>🗑️</button>
-            </div>
-          ))}
+      {showPanel && (
+        <div style={{ position: 'absolute', top: 60, right: 0, width: '80vw', maxWidth: 300, background: '#fff', padding: 8, borderRadius: '8px 0 0 8px', maxHeight: '70vh', overflowY: 'auto' }}>
+          <strong>關鍵詞：</strong>{keyword}
+          <div style={{ marginTop: 8 }}>
+            {allLinks.map((term) => (
+              <div key={term} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <span>{term}</span>
+                <button onClick={() => deleteAnyRelation(term)} style={{ marginLeft: 8 }}>🗑️</button>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       <a
         href="https://www.buymeacoffee.com/qooeego"
         target="_blank"
-        style={{
-          position: 'absolute',
-          bottom: 16,
-          right: 16,
-          textDecoration: 'none',
-          fontSize: 14,
-          background: '#ffdd00',
-          padding: '6px 12px',
-          borderRadius: '6px',
-          color: '#000',
-        }}
-      >
-        ☕ Buy Me a Coffee
-      </a>
+        style={{ position: 'absolute', bottom: 16, right: 16, textDecoration: 'none', fontSize: 14, background: '#ffdd00', padding: '6px 12px', borderRadius: '6px', color: '#000' }}
+      >☕ Buy Me a Coffee</a>
     </div>
   );
 }
