@@ -2,6 +2,33 @@ import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
 const defaultInputPos = { x: window.innerWidth / 2 - 100, y: 150 };
+const conceptNetUrl = (keyword) => `https://api.conceptnet.io/c/zh/${encodeURIComponent(keyword)}`;
+const proxyUrlFactories = [
+  (keyword) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword)}`,
+  (keyword) => `https://thingproxy.freeboard.io/fetch/${conceptNetUrl(keyword)}`,
+  (keyword) => `https://api.allorigins.win/raw?url=${encodeURIComponent(conceptNetUrl(keyword))}`
+];
+
+const fetchWithFallback = async (keyword) => {
+  const urlFactories = [conceptNetUrl, ...proxyUrlFactories];
+  let lastError;
+
+  for (const builder of urlFactories) {
+    const targetUrl = builder(keyword);
+    try {
+      const response = await fetch(targetUrl);
+      if (!response.ok) {
+        throw new Error(`ConceptNet 回應碼 ${response.status}`);
+      }
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('ConceptNet 請求失敗');
+};
 
 export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
@@ -13,6 +40,7 @@ export default function App() {
   const [allLinks, setAllLinks] = useState([]);
   const [history, setHistory] = useState([]);
   const [showPanel, setShowPanel] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
   const fgRef = useRef();
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
@@ -20,14 +48,16 @@ export default function App() {
 
   const fetchGraph = async (centerWord) => {
     setLoading(true);
+    setErrorMessage('');
+
+    const customTerms = userData.current[centerWord] || [];
+    const deletedTerms = new Set(deletedData.current[centerWord] || []);
+
+    let relatedEdges = [];
+
     try {
-      const res = await fetch(`https://api.conceptnet.io/c/zh/${encodeURIComponent(centerWord)}`);
-      const data = await res.json();
-
-      const customTerms = userData.current[centerWord] || [];
-      const deletedTerms = new Set(deletedData.current[centerWord] || []);
-
-      const relatedEdges = data.edges
+      const data = await fetchWithFallback(centerWord);
+      relatedEdges = (data.edges || [])
         .filter((edge) => {
           const endLabel = edge.end?.label || edge.end?.term;
           return (
@@ -38,43 +68,45 @@ export default function App() {
           );
         })
         .slice(0, 20);
-
-      const allRelated = Array.from(
-        new Set([
-          ...relatedEdges.map((e) => e.end?.label || e.end?.term),
-          ...customTerms
-        ])
-      ).filter((term) => !deletedTerms.has(term));
-
-      const newNodes = [
-        { id: centerWord, main: true },
-        ...allRelated.map((r) => ({ id: r }))
-      ];
-
-      const newLinks = [
-        ...relatedEdges.map((edge) => ({
-          source: centerWord,
-          target: edge.end?.label || edge.end?.term,
-          weight: Math.max(1, edge.weight * 2)
-        })),
-        ...customTerms
-          .filter((term) => !deletedTerms.has(term))
-          .map((term) => ({
-            source: centerWord,
-            target: term,
-            weight: 4
-          }))
-      ];
-
-      setGraphData({ nodes: newNodes, links: newLinks });
-      setAllLinks(allRelated);
-
-      if (fgRef.current) {
-        fgRef.current.d3ReheatSimulation();
-      }
-    } catch (e) {
-      console.error('探索失敗', e);
+    } catch (error) {
+      console.error('探索失敗', error);
+      setErrorMessage('無法連到 ConceptNet，僅顯示自訂關聯。');
     }
+
+    const allRelated = Array.from(
+      new Set([
+        ...relatedEdges.map((e) => e.end?.label || e.end?.term),
+        ...customTerms
+      ])
+    ).filter((term) => !deletedTerms.has(term));
+
+    const newNodes = [
+      { id: centerWord, main: true },
+      ...allRelated.map((r) => ({ id: r }))
+    ];
+
+    const newLinks = [
+      ...relatedEdges.map((edge) => ({
+        source: centerWord,
+        target: edge.end?.label || edge.end?.term,
+        weight: Math.max(1, edge.weight * 2)
+      })),
+      ...customTerms
+        .filter((term) => !deletedTerms.has(term))
+        .map((term) => ({
+          source: centerWord,
+          target: term,
+          weight: 4
+        }))
+    ];
+
+    setGraphData({ nodes: newNodes, links: newLinks });
+    setAllLinks(allRelated);
+
+    if (fgRef.current) {
+      fgRef.current.d3ReheatSimulation();
+    }
+
     setLoading(false);
   };
 
@@ -157,6 +189,10 @@ export default function App() {
           onClick={() => setShowPanel(!showPanel)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#888', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >{showPanel ? '▶️ 收起編輯區' : '📌 編輯區'}</button>
+        {loading && <span style={{ alignSelf: 'center', color: '#444' }}>載入中...</span>}
+        {errorMessage && (
+          <span style={{ width: '100%', color: '#c0392b', fontWeight: 600 }}>{errorMessage}</span>
+        )}
       </div>
 
       <ForceGraph2D
