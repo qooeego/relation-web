@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
+const defaultInputPos = { x: window.innerWidth / 2 - 100, y: 150 };
+
 export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [keyword, setKeyword] = useState('狗');
   const [loading, setLoading] = useState(false);
   const [addMode, setAddMode] = useState(false);
-  const [inputPos, setInputPos] = useState({ x: window.innerWidth / 2 - 100, y: 150 });
+  const [inputPos, setInputPos] = useState(defaultInputPos);
   const [inputValue, setInputValue] = useState('');
   const [allLinks, setAllLinks] = useState([]);
   const [history, setHistory] = useState([]);
@@ -103,7 +105,6 @@ export default function App() {
 
     setInputValue('');
     setAddMode(false);
-    setInputPos(null);
     fetchGraph(current);
   };
 
@@ -146,7 +147,10 @@ export default function App() {
           style={{ padding: '0.5rem 1rem', backgroundColor: history.length === 0 ? '#ccc' : '#2196F3', color: 'white', border: 'none', borderRadius: '4px', cursor: history.length === 0 ? 'not-allowed' : 'pointer' }}
         >← 返回</button>
         <button
-          onClick={() => setAddMode(true)}
+          onClick={() => {
+            setInputPos(defaultInputPos);
+            setAddMode(true);
+          }}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#f39c12', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >➕ 新增關聯</button>
         <button
@@ -191,7 +195,7 @@ export default function App() {
         }}
       />
 
-      {addMode && (
+      {addMode && inputPos && (
         <input
           style={{ position: 'absolute', left: inputPos.x, top: inputPos.y, fontSize: '16px', padding: '4px', zIndex: 10, border: '1px solid #ccc', borderRadius: '4px' }}
           autoFocus
