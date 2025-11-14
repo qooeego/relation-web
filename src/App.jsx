@@ -68,6 +68,7 @@ export default function App() {
   const [showStatusPanel, setShowStatusPanel] = useState(false);
   const [importText, setImportText] = useState('');
   const [importNotice, setImportNotice] = useState(null);
+  const [isDragOverImport, setIsDragOverImport] = useState(false);
   const [clickCounts, setClickCounts] = useState(() => {
     if (typeof window === 'undefined') return {};
     try {
@@ -296,6 +297,24 @@ export default function App() {
     downloadJson(payload, 'custom-relations.json');
   };
 
+  const applyCustomPayload = (payload, successMessage = '匯入成功！重新整理圖譜中。') => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('JSON 內容必須是物件');
+    }
+
+    if (payload.userGraphData) {
+      userData.current = payload.userGraphData;
+      localStorage.setItem('userGraphData', JSON.stringify(userData.current));
+    }
+    if (payload.deletedGraphData) {
+      deletedData.current = payload.deletedGraphData;
+      localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
+    }
+
+    setImportNotice({ type: 'success', message: successMessage });
+    fetchGraph(keyword, language);
+  };
+
   const importCustomData = () => {
     setImportNotice(null);
     if (!importText.trim()) {
@@ -305,19 +324,44 @@ export default function App() {
 
     try {
       const payload = JSON.parse(importText);
-      if (payload.userGraphData) {
-        userData.current = payload.userGraphData;
-        localStorage.setItem('userGraphData', JSON.stringify(userData.current));
-      }
-      if (payload.deletedGraphData) {
-        deletedData.current = payload.deletedGraphData;
-        localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
-      }
-      setImportNotice({ type: 'success', message: '匯入成功！重新整理圖譜中。' });
-      fetchGraph(keyword, language);
+      applyCustomPayload(payload);
     } catch (error) {
       console.error('匯入自訂資料失敗', error);
       setImportNotice({ type: 'error', message: `匯入失敗：${error.message}` });
+    }
+  };
+
+  const handleImportDragOver = (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setIsDragOverImport(true);
+  };
+
+  const handleImportDragLeave = (event) => {
+    event.preventDefault();
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setIsDragOverImport(false);
+  };
+
+  const handleImportDrop = async (event) => {
+    event.preventDefault();
+    setIsDragOverImport(false);
+    setImportNotice(null);
+    const file = event.dataTransfer?.files?.[0];
+    if (!file) {
+      setImportNotice({ type: 'error', message: '找不到檔案，請拖曳 JSON 檔案後再試一次。' });
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setImportText(text);
+      const payload = JSON.parse(text);
+      applyCustomPayload(payload, `已套用檔案「${file.name}」。`);
+    } catch (error) {
+      console.error('拖曳匯入失敗', error);
+      setImportNotice({ type: 'error', message: `拖曳匯入失敗：${error.message}` });
     }
   };
 
@@ -469,12 +513,25 @@ export default function App() {
               <button onClick={exportCustomData} style={{ padding: '0.3rem 0.75rem', borderRadius: 4, border: '1px solid #27ae60', background: '#27ae60', color: '#fff' }}>⬇️ 匯出 JSON</button>
               <button onClick={() => { setImportText(''); setImportNotice(null); }} style={{ padding: '0.3rem 0.75rem', borderRadius: 4, border: '1px solid #ccc', background: '#ecf0f1' }}>🧹 清空匯入區</button>
             </div>
-            <textarea
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              placeholder="貼上包含 userGraphData / deletedGraphData 的 JSON，或自行撰寫新的資料結構"
-              style={{ width: '100%', minHeight: 100, borderRadius: 6, border: '1px solid #ddd', padding: 8, fontFamily: 'monospace', fontSize: 12 }}
-            />
+            <div
+              onDragOver={handleImportDragOver}
+              onDragLeave={handleImportDragLeave}
+              onDrop={handleImportDrop}
+              style={{
+                border: `2px dashed ${isDragOverImport ? '#2980b9' : '#bbb'}`,
+                borderRadius: 8,
+                padding: 8,
+                background: isDragOverImport ? '#f0f8ff' : '#fafafa'
+              }}
+            >
+              <textarea
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                placeholder="貼上包含 userGraphData / deletedGraphData 的 JSON，或直接拖曳匯出檔到此處"
+                style={{ width: '100%', minHeight: 100, borderRadius: 6, border: '1px solid #ddd', padding: 8, fontFamily: 'monospace', fontSize: 12, background: '#fff' }}
+              />
+              <p style={{ margin: '6px 0 0', fontSize: 12, color: '#555' }}>也可以拖曳匯出 JSON 檔到此區，自動填入並套用。</p>
+            </div>
             <button onClick={importCustomData} style={{ marginTop: 8, padding: '0.4rem 0.8rem', borderRadius: 4, border: '1px solid #2980b9', background: '#2980b9', color: '#fff' }}>⬆️ 匯入 / 套用</button>
             {importNotice && (
               <div style={{ marginTop: 6, fontSize: 12, color: importNotice.type === 'error' ? '#c0392b' : '#27ae60' }}>
