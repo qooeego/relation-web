@@ -40,6 +40,16 @@ const fetchWithFallback = async (keyword, language) => {
   throw finalError;
 };
 
+const loadStoredClickCounts = () => {
+  if (typeof window === 'undefined') return {};
+  try {
+    return JSON.parse(localStorage.getItem('nodeClickCounts')) || {};
+  } catch (error) {
+    console.warn('Failed to parse node click counts', error);
+    return {};
+  }
+};
+
 const downloadJson = (data, filename) => {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -69,15 +79,8 @@ export default function App() {
   const [importText, setImportText] = useState('');
   const [importNotice, setImportNotice] = useState(null);
   const [isDragOverImport, setIsDragOverImport] = useState(false);
-  const [clickCounts, setClickCounts] = useState(() => {
-    if (typeof window === 'undefined') return {};
-    try {
-      return JSON.parse(localStorage.getItem('nodeClickCounts')) || {};
-    } catch (error) {
-      console.warn('Failed to parse node click counts', error);
-      return {};
-    }
-  });
+  const clickCountsRef = useRef(loadStoredClickCounts());
+  const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
@@ -107,6 +110,19 @@ export default function App() {
     const sourceId = getEndpointId(link.source);
     if (sourceId && sourceId !== focusId) return sourceId;
     return targetId || sourceId || '';
+  };
+
+  const refreshClickCountsSnapshot = () => {
+    const latest = loadStoredClickCounts();
+    clickCountsRef.current = latest;
+    setClickCountsSnapshot(latest);
+  };
+
+  const persistClickCounts = (nextCounts) => {
+    clickCountsRef.current = nextCounts;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('nodeClickCounts', JSON.stringify(nextCounts));
+    }
   };
 
   const fetchGraph = async (centerWord, currentLang = language) => {
@@ -204,6 +220,7 @@ export default function App() {
       fgRef.current.d3ReheatSimulation();
     }
 
+    refreshClickCountsSnapshot();
     setLoading(false);
   };
 
@@ -211,26 +228,20 @@ export default function App() {
     fetchGraph(keyword, language);
   }, [language]);
 
-  useEffect(() => {
-    if (fgRef.current) {
-      fgRef.current.d3ReheatSimulation();
-    }
-  }, [clickCounts]);
-
   const recordNodeClick = (nodeId, currentLang = language) => {
     if (!nodeId) return;
-    setClickCounts((prev) => {
-      const scopedKey = getScopedKey(currentLang, nodeId);
-      const next = { ...prev, [scopedKey]: (prev[scopedKey] || 0) + 1 };
-      localStorage.setItem('nodeClickCounts', JSON.stringify(next));
-      return next;
-    });
+    const scopedKey = getScopedKey(currentLang, nodeId);
+    const next = {
+      ...clickCountsRef.current,
+      [scopedKey]: (clickCountsRef.current[scopedKey] || 0) + 1
+    };
+    persistClickCounts(next);
   };
 
   const getNodeClickCount = (term, currentLang = language) => {
     if (!term) return 0;
     const scopedKey = getScopedKey(currentLang, term);
-    return clickCounts[scopedKey] || 0;
+    return clickCountsSnapshot[scopedKey] || 0;
   };
 
   const handleClickNode = (node) => {
