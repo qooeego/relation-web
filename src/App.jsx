@@ -59,28 +59,63 @@ const providerLabels = {
 };
 const conceptNetUrl = (keyword, language) =>
   `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
-const proxyUrlFactories = [
-  (keyword, language) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword, language)}`,
-  (keyword, language) => `https://thingproxy.freeboard.io/fetch/${conceptNetUrl(keyword, language)}`,
-  (keyword, language) => `https://api.allorigins.win/raw?url=${encodeURIComponent(conceptNetUrl(keyword, language))}`
+
+const fallbackEndpoints = [
+  {
+    label: 'conceptnet.io',
+    build: conceptNetUrl,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'cors.isomorphic-git.org',
+    build: (keyword, language) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword, language)}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'thingproxy.freeboard.io',
+    build: (keyword, language) => `https://thingproxy.freeboard.io/fetch/${conceptNetUrl(keyword, language)}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'api.allorigins.win',
+    build: (keyword, language) =>
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(conceptNetUrl(keyword, language))}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'r.jina.ai mirror',
+    build: (keyword, language) =>
+      `https://r.jina.ai/http://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`,
+    parser: async (response) => {
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        throw new Error('Mirror JSON 解析失敗');
+      }
+    }
+  }
 ];
 
 const fetchWithFallback = async (keyword, language) => {
-  const urlFactories = [conceptNetUrl, ...proxyUrlFactories];
   const attempts = [];
   let lastError;
 
-  for (const builder of urlFactories) {
-    const targetUrl = builder(keyword, language);
+  for (const endpoint of fallbackEndpoints) {
+    const targetUrl = endpoint.build(keyword, language);
     try {
       const response = await fetch(targetUrl);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const data = await response.json();
+      const data = await endpoint.parser(response);
       return data;
     } catch (error) {
-      attempts.push(`${new URL(targetUrl).host}: ${error.message}`);
+      try {
+        attempts.push(`${endpoint.label || new URL(targetUrl).host}: ${error.message}`);
+      } catch {
+        attempts.push(`${endpoint.label || targetUrl}: ${error.message}`);
+      }
       lastError = error;
     }
   }
