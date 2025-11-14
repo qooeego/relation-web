@@ -1,11 +1,62 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
+const loadScript = (id, src) =>
+  new Promise((resolve, reject) => {
+    if (typeof document === 'undefined') {
+      reject(new Error('無法在非瀏覽器環境載入外部腳本'));
+      return;
+    }
+    if (document.getElementById(id)) {
+      resolve();
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = id;
+    script.src = src;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`載入 ${src} 失敗`));
+    document.body.appendChild(script);
+  });
+
+const decodeJwtPayload = (token) => {
+  try {
+    const [, payload] = token.split('.');
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = decodeURIComponent(
+      atob(normalized)
+        .split('')
+        .map((char) => `%${`00${char.charCodeAt(0).toString(16)}`.slice(-2)}`)
+        .join('')
+    );
+    return JSON.parse(decoded);
+  } catch (error) {
+    console.warn('解析 JWT 失敗', error);
+    return null;
+  }
+};
+
+const loadStoredMemberProfile = () => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return JSON.parse(localStorage.getItem('memberProfile'));
+  } catch {
+    return null;
+  }
+};
+
 const defaultInputPos = { x: window.innerWidth / 2 - 100, y: 150 };
 const supportedLanguages = [
   { value: 'zh', label: '中文 (zh)' },
   { value: 'en', label: 'English (en)' }
 ];
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+const facebookAppId = import.meta.env.VITE_FACEBOOK_APP_ID;
+const providerLabels = {
+  google: 'Google',
+  facebook: 'Facebook'
+};
 const conceptNetUrl = (keyword, language) =>
   `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
 const proxyUrlFactories = [
@@ -79,12 +130,20 @@ export default function App() {
   const [importText, setImportText] = useState('');
   const [importNotice, setImportNotice] = useState(null);
   const [isDragOverImport, setIsDragOverImport] = useState(false);
+  const [memberProfile, setMemberProfile] = useState(loadStoredMemberProfile);
+  const [authNotice, setAuthNotice] = useState('');
+  const [googleReady, setGoogleReady] = useState(false);
+  const [facebookReady, setFacebookReady] = useState(false);
   const clickCountsRef = useRef(loadStoredClickCounts());
   const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
   const graphCacheRef = useRef({});
   const inFlightPrefetchRef = useRef(new Set());
   const activeRequestRef = useRef(0);
+  const googleButtonRef = useRef(null);
+  const googleInitializedRef = useRef(false);
+  const googleButtonRenderedRef = useRef(false);
+  const fbInitRef = useRef(false);
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
   const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
@@ -119,6 +178,29 @@ export default function App() {
     const latest = loadStoredClickCounts();
     clickCountsRef.current = latest;
     setClickCountsSnapshot(latest);
+  };
+
+  const applyMemberProfile = (profile) => {
+    if (!profile) return;
+    const normalizedProfile = {
+      provider: profile.provider,
+      name: profile.name,
+      email: profile.email,
+      avatar: profile.avatar,
+      id: profile.id,
+      lastLoginAt: new Date().toISOString()
+    };
+    setMemberProfile(normalizedProfile);
+    try {
+      localStorage.setItem('memberProfile', JSON.stringify(normalizedProfile));
+    } catch {}
+  };
+
+  const clearMemberProfile = () => {
+    setMemberProfile(null);
+    try {
+      localStorage.removeItem('memberProfile');
+    } catch {}
   };
 
   const persistClickCounts = (nextCounts) => {
@@ -289,6 +371,85 @@ export default function App() {
     fetchGraph(keyword, language);
   }, [language]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!googleClientId) return () => {};
+    if (googleReady || typeof window === 'undefined') return () => {};
+
+    loadScript('google-identity-service', 'https://accounts.google.com/gsi/client')
+      .then(() => {
+        if (!cancelled) {
+          setGoogleReady(true);
+        }
+      })
+      .catch((error) => {
+        console.error('載入 Google Identity Service 失敗', error);
+        if (!cancelled) {
+          setAuthNotice('無法載入 Google 登入服務，請檢查網路或 client id 設定。');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [googleClientId, googleReady]);
+
+  useEffect(() => {
+    if (!googleReady || googleInitializedRef.current) return;
+    if (!googleClientId || typeof window === 'undefined' || !window.google?.accounts?.id) return;
+    window.google.accounts.id.initialize({
+      client_id: googleClientId,
+      callback: (response) => {
+        if (!response?.credential) {
+          setAuthNotice('Google 未回傳憑證，請再試一次。');
+          return;
+        }
+        const payload = decodeJwtPayload(response.credential);
+        if (!payload) {
+          setAuthNotice('無法解析 Google 回傳的資料。');
+          return;
+        }
+        applyMemberProfile({
+          provider: 'google',
+          name: payload.name,
+          email: payload.email,
+          avatar: payload.picture,
+          id: payload.sub
+        });
+        setAuthNotice('已透過 Google 登入');
+      }
+    });
+    googleInitializedRef.current = true;
+  }, [googleClientId, googleReady]);
+
+  useEffect(() => {
+    if (!googleReady || !googleButtonRef.current || googleButtonRenderedRef.current) return;
+    if (!window.google?.accounts?.id) return;
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      theme: 'outline',
+      size: 'medium',
+      text: 'signin_with'
+    });
+    googleButtonRenderedRef.current = true;
+  }, [googleReady]);
+
+  useEffect(() => {
+    if (!facebookAppId || fbInitRef.current || typeof window === 'undefined') return;
+    window.fbAsyncInit = () => {
+      window.FB.init({
+        appId: facebookAppId,
+        cookie: true,
+        xfbml: false,
+        version: 'v19.0'
+      });
+      setFacebookReady(true);
+      fbInitRef.current = true;
+    };
+    loadScript('facebook-jssdk', 'https://connect.facebook.net/en_US/sdk.js').catch((error) => {
+      console.error('載入 Facebook SDK 失敗', error);
+      setAuthNotice('Facebook SDK 載入失敗，請確認 app id 是否正確。');
+    });
+  }, [facebookAppId]);
+
   const recordNodeClick = (nodeId, currentLang = language) => {
     if (!nodeId) return;
     const scopedKey = getScopedKey(currentLang, nodeId);
@@ -345,6 +506,49 @@ export default function App() {
 
     invalidateCache(scopedKey);
     fetchGraph(current, language);
+  };
+
+  const handleFacebookLogin = () => {
+    if (typeof window === 'undefined') return;
+    if (!facebookReady || !window.FB) {
+      setAuthNotice('Facebook SDK 尚未就緒，請稍候再試。');
+      return;
+    }
+    setAuthNotice('正在向 Facebook 取得授權…');
+    window.FB.login(
+      (response) => {
+        if (response.status !== 'connected') {
+          setAuthNotice('Facebook 登入失敗或已取消。');
+          return;
+        }
+        window.FB.api('/me', { fields: 'name,email,picture' }, (profile) => {
+          if (!profile || profile.error) {
+            setAuthNotice('無法讀取 Facebook 會員資料。');
+            return;
+          }
+          applyMemberProfile({
+            provider: 'facebook',
+            name: profile.name,
+            email: profile.email,
+            avatar: profile.picture?.data?.url,
+            id: profile.id
+          });
+          setAuthNotice('已透過 Facebook 登入');
+        });
+      },
+      { scope: 'public_profile,email' }
+    );
+  };
+
+  const handleLogout = () => {
+    clearMemberProfile();
+    if (typeof window !== 'undefined' && window.google?.accounts?.id) {
+      window.google.accounts.id.disableAutoSelect();
+    }
+    if (typeof window !== 'undefined' && window.FB?.logout) {
+      window.FB.logout();
+    }
+    setAuthNotice('已登出。');
   };
 
   const handleBack = () => {
@@ -509,6 +713,47 @@ export default function App() {
           onClick={() => setShowStatusPanel(!showStatusPanel)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >{showStatusPanel ? '🛰️ 關閉連線說明' : '🛰️ 連線說明'}</button>
+        <div style={{ minWidth: 260, padding: '0.5rem', border: '1px solid #ddd', borderRadius: 8, background: '#fff', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {memberProfile ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {memberProfile.avatar && (
+                <img src={memberProfile.avatar} alt="會員頭像" style={{ width: 40, height: 40, borderRadius: '50%' }} />
+              )}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600 }}>{memberProfile.name || '已登入會員'}</div>
+                {memberProfile.email && <div style={{ fontSize: 12 }}>{memberProfile.email}</div>}
+                <div style={{ fontSize: 12, color: '#555' }}>
+                  透過 {providerLabels[memberProfile.provider] || memberProfile.provider} 登入
+                </div>
+              </div>
+              <button onClick={handleLogout} style={{ padding: '0.25rem 0.5rem', borderRadius: 4, border: '1px solid #ccc', background: '#f8f8f8' }}>登出</button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <strong style={{ fontSize: 13 }}>登入以記住會員資訊</strong>
+              {googleClientId ? (
+                <div ref={googleButtonRef} style={{ display: 'inline-flex' }} />
+              ) : (
+                <button disabled style={{ padding: '0.4rem', borderRadius: 6, border: '1px solid #ddd', background: '#fefefe', color: '#888' }}>
+                  設定 VITE_GOOGLE_CLIENT_ID 後即可啟用 Google 登入
+                </button>
+              )}
+              <button
+                onClick={handleFacebookLogin}
+                disabled={!facebookAppId}
+                style={{
+                  padding: '0.4rem',
+                  borderRadius: 6,
+                  border: '1px solid #1877f2',
+                  background: facebookAppId ? '#1877f2' : '#ccc',
+                  color: '#fff',
+                  cursor: facebookAppId ? 'pointer' : 'not-allowed'
+                }}
+              >使用 Facebook 登入</button>
+            </div>
+          )}
+          {authNotice && <span style={{ fontSize: 12, color: '#555' }}>{authNotice}</span>}
+        </div>
         {loading && <span style={{ alignSelf: 'center', color: '#444' }}>載入中...</span>}
         {errorMessage && (
           <span style={{ width: '100%', color: '#c0392b', fontWeight: 600 }}>{errorMessage}</span>
