@@ -1,42 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
-const loadScript = (id, src) =>
-  new Promise((resolve, reject) => {
-    if (typeof document === 'undefined') {
-      reject(new Error('無法在非瀏覽器環境載入外部腳本'));
-      return;
-    }
-    if (document.getElementById(id)) {
-      resolve();
-      return;
-    }
-    const script = document.createElement('script');
-    script.id = id;
-    script.src = src;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`載入 ${src} 失敗`));
-    document.body.appendChild(script);
-  });
-
-const decodeJwtPayload = (token) => {
-  try {
-    const [, payload] = token.split('.');
-    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const decoded = decodeURIComponent(
-      atob(normalized)
-        .split('')
-        .map((char) => `%${`00${char.charCodeAt(0).toString(16)}`.slice(-2)}`)
-        .join('')
-    );
-    return JSON.parse(decoded);
-  } catch (error) {
-    console.warn('解析 JWT 失敗', error);
-    return null;
-  }
-};
-
 const loadStoredMemberProfile = () => {
   if (typeof window === 'undefined') return null;
   try {
@@ -46,19 +10,29 @@ const loadStoredMemberProfile = () => {
   }
 };
 
+const loadStoredMembers = () => {
+  if (typeof window === 'undefined') return {};
+  try {
+    return JSON.parse(localStorage.getItem('simpleMembers')) || {};
+  } catch {
+    return {};
+  }
+};
+
+const persistMembers = (members) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('simpleMembers', JSON.stringify(members));
+  } catch {}
+};
+
 const defaultInputPos = { x: window.innerWidth / 2 - 100, y: 150 };
 const supportedLanguages = [
   { value: 'zh', label: '中文 (zh)' },
   { value: 'en', label: 'English (en)' }
 ];
-const googleClientId =
-  import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-  '164342953108-7i09t4spu6hsois0svtph7fh55fasdsf.apps.googleusercontent.com';
-const facebookAppId =
-  import.meta.env.VITE_FACEBOOK_APP_ID || '2834341560104833';
 const providerLabels = {
-  google: 'Google',
-  facebook: 'Facebook'
+  local: '站內帳號'
 };
 const conceptNetUrl = (keyword, language) =>
   `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
@@ -170,18 +144,15 @@ export default function App() {
   const [isDragOverImport, setIsDragOverImport] = useState(false);
   const [memberProfile, setMemberProfile] = useState(loadStoredMemberProfile);
   const [authNotice, setAuthNotice] = useState('');
-  const [googleReady, setGoogleReady] = useState(false);
-  const [facebookReady, setFacebookReady] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authForm, setAuthForm] = useState({ account: '', password: '', confirm: '' });
   const clickCountsRef = useRef(loadStoredClickCounts());
   const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
   const graphCacheRef = useRef({});
   const inFlightPrefetchRef = useRef(new Set());
   const activeRequestRef = useRef(0);
-  const googleButtonRef = useRef(null);
-  const googleInitializedRef = useRef(false);
-  const fbInitRef = useRef(false);
+  const membersRef = useRef(loadStoredMembers());
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
   const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
@@ -239,6 +210,55 @@ export default function App() {
     try {
       localStorage.removeItem('memberProfile');
     } catch {}
+  };
+
+  const resetAuthForm = () => setAuthForm({ account: '', password: '', confirm: '' });
+
+  const handleLocalAuth = (event) => {
+    event?.preventDefault?.();
+    const trimmedAccount = authForm.account.trim();
+    if (!trimmedAccount || !authForm.password || !authForm.confirm) {
+      setAuthNotice('請完整填寫帳號、密碼與確認密碼。');
+      return;
+    }
+    if (authForm.password !== authForm.confirm) {
+      setAuthNotice('密碼與確認密碼不一致。');
+      return;
+    }
+
+    const existingMembers = membersRef.current || {};
+    const existing = existingMembers[trimmedAccount];
+
+    if (existing) {
+      if (existing.password !== authForm.password) {
+        setAuthNotice('密碼不正確，請再試一次。');
+        return;
+      }
+      applyMemberProfile({
+        provider: 'local',
+        name: trimmedAccount,
+        id: trimmedAccount
+      });
+      setAuthNotice('登入成功，已記住此帳號。');
+    } else {
+      const nextMembers = {
+        ...existingMembers,
+        [trimmedAccount]: {
+          password: authForm.password,
+          createdAt: new Date().toISOString()
+        }
+      };
+      membersRef.current = nextMembers;
+      persistMembers(nextMembers);
+      applyMemberProfile({
+        provider: 'local',
+        name: trimmedAccount,
+        id: trimmedAccount
+      });
+      setAuthNotice('註冊並登入成功！');
+    }
+
+    resetAuthForm();
   };
 
   const persistClickCounts = (nextCounts) => {
@@ -410,88 +430,9 @@ export default function App() {
   }, [language]);
 
   useEffect(() => {
-    let cancelled = false;
-    if (!googleClientId) return () => {};
-    if (googleReady || typeof window === 'undefined') return () => {};
-
-    loadScript('google-identity-service', 'https://accounts.google.com/gsi/client')
-      .then(() => {
-        if (!cancelled) {
-          setGoogleReady(true);
-        }
-      })
-      .catch((error) => {
-        console.error('載入 Google Identity Service 失敗', error);
-        if (!cancelled) {
-          setAuthNotice('無法載入 Google 登入服務，請檢查網路或 client id 設定。');
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [googleClientId, googleReady]);
-
-  useEffect(() => {
-    if (!googleReady || googleInitializedRef.current) return;
-    if (!googleClientId || typeof window === 'undefined' || !window.google?.accounts?.id) return;
-    window.google.accounts.id.initialize({
-      client_id: googleClientId,
-      callback: (response) => {
-        if (!response?.credential) {
-          setAuthNotice('Google 未回傳憑證，請再試一次。');
-          return;
-        }
-        const payload = decodeJwtPayload(response.credential);
-        if (!payload) {
-          setAuthNotice('無法解析 Google 回傳的資料。');
-          return;
-        }
-        applyMemberProfile({
-          provider: 'google',
-          name: payload.name,
-          email: payload.email,
-          avatar: payload.picture,
-          id: payload.sub
-        });
-        setAuthNotice('已透過 Google 登入');
-      }
-    });
-    googleInitializedRef.current = true;
-  }, [googleClientId, googleReady]);
-
-  useEffect(() => {
-    if (!googleReady || !showAuthModal) return;
-    if (!googleButtonRef.current) return;
-    if (!window.google?.accounts?.id) return;
-    googleButtonRef.current.innerHTML = '';
-    window.google.accounts.id.renderButton(googleButtonRef.current, {
-      theme: 'outline',
-      size: 'medium',
-      text: 'signin_with'
-    });
-  }, [googleReady, showAuthModal]);
-
-  useEffect(() => {
-    if (!facebookAppId || fbInitRef.current || typeof window === 'undefined') return;
-    window.fbAsyncInit = () => {
-      window.FB.init({
-        appId: facebookAppId,
-        cookie: true,
-        xfbml: false,
-        version: 'v19.0'
-      });
-      setFacebookReady(true);
-      fbInitRef.current = true;
-    };
-    loadScript('facebook-jssdk', 'https://connect.facebook.net/en_US/sdk.js').catch((error) => {
-      console.error('載入 Facebook SDK 失敗', error);
-      setAuthNotice('Facebook SDK 載入失敗，請確認 app id 是否正確。');
-    });
-  }, [facebookAppId]);
-
-  useEffect(() => {
     if (!showAuthModal) {
       setAuthNotice('');
+      resetAuthForm();
     }
   }, [showAuthModal]);
 
@@ -553,47 +494,10 @@ export default function App() {
     fetchGraph(current, language);
   };
 
-  const handleFacebookLogin = () => {
-    if (typeof window === 'undefined') return;
-    if (!facebookReady || !window.FB) {
-      setAuthNotice('Facebook SDK 尚未就緒，請稍候再試。');
-      return;
-    }
-    setAuthNotice('正在向 Facebook 取得授權…');
-    window.FB.login(
-      (response) => {
-        if (response.status !== 'connected') {
-          setAuthNotice('Facebook 登入失敗或已取消。');
-          return;
-        }
-        window.FB.api('/me', { fields: 'name,email,picture' }, (profile) => {
-          if (!profile || profile.error) {
-            setAuthNotice('無法讀取 Facebook 會員資料。');
-            return;
-          }
-          applyMemberProfile({
-            provider: 'facebook',
-            name: profile.name,
-            email: profile.email,
-            avatar: profile.picture?.data?.url,
-            id: profile.id
-          });
-          setAuthNotice('已透過 Facebook 登入');
-        });
-      },
-      { scope: 'public_profile,email' }
-    );
-  };
-
   const handleLogout = () => {
     clearMemberProfile();
-    if (typeof window !== 'undefined' && window.google?.accounts?.id) {
-      window.google.accounts.id.disableAutoSelect();
-    }
-    if (typeof window !== 'undefined' && window.FB?.logout) {
-      window.FB.logout();
-    }
     setAuthNotice('已登出。');
+    resetAuthForm();
   };
 
   const handleBack = () => {
@@ -971,57 +875,59 @@ export default function App() {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <p style={{ fontSize: 13, color: '#333', marginBottom: 0 }}>
-                  透過 Google 或 Facebook 登入 / 註冊，就能記住你的自訂關聯和匯入紀錄，下次使用直接載入會員資料。
+                  不想依賴第三方？直接建立站內帳號吧！只要填寫帳號、密碼與確認密碼，我們就會在本機瀏覽器記住你的會員資訊。
                 </p>
-                {googleClientId ? (
-                  <div ref={googleButtonRef} style={{ display: 'inline-flex' }} />
-                ) : (
-                  <div
+                <form onSubmit={handleLocalAuth} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                    帳號
+                    <input
+                      value={authForm.account}
+                      onChange={(e) => setAuthForm((prev) => ({ ...prev, account: e.target.value }))}
+                      placeholder="輸入帳號"
+                      autoComplete="username"
+                      style={{ padding: '0.5rem', borderRadius: 8, border: '1px solid #ccc' }}
+                    />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                    密碼
+                    <input
+                      type="password"
+                      value={authForm.password}
+                      onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
+                      placeholder="輸入密碼"
+                      autoComplete="new-password"
+                      style={{ padding: '0.5rem', borderRadius: 8, border: '1px solid #ccc' }}
+                    />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                    確認密碼
+                    <input
+                      type="password"
+                      value={authForm.confirm}
+                      onChange={(e) => setAuthForm((prev) => ({ ...prev, confirm: e.target.value }))}
+                      placeholder="再次輸入密碼"
+                      autoComplete="new-password"
+                      style={{ padding: '0.5rem', borderRadius: 8, border: '1px solid #ccc' }}
+                    />
+                  </label>
+                  <button
+                    type="submit"
                     style={{
-                      fontSize: 12,
-                      padding: '0.5rem',
+                      padding: '0.5rem 1rem',
                       borderRadius: 8,
-                      border: '1px solid #ddd',
-                      background: '#fdfdfd',
-                      color: '#555',
-                      lineHeight: 1.6
+                      border: 'none',
+                      background: '#2c82c9',
+                      color: '#fff',
+                      fontSize: 15,
+                      cursor: 'pointer'
                     }}
                   >
-                    目前尚未設定 <code>VITE_GOOGLE_CLIENT_ID</code>，因此無法使用 Google 登入 / 註冊。
-                    <br />
-                    這代表需要在部署環境中填入你向 Google Cloud 申請的 OAuth 2.0 Client ID。若不確定，請洽詢網站管理者或按照
-                    <a
-                      href="https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid"
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ marginLeft: 4 }}
-                    >
-                      官方教學
-                    </a>
-                    建立新的 Client 並將值寫進 <code>.env</code> 檔。
-                  </div>
-                )}
-                <button
-                  onClick={handleFacebookLogin}
-                  disabled={!facebookAppId}
-                  style={{
-                    padding: '0.5rem 1rem',
-                    borderRadius: 8,
-                    border: '1px solid #1877f2',
-                    background: facebookAppId ? '#1877f2' : '#ccc',
-                    color: '#fff',
-                    fontSize: 14,
-                    cursor: facebookAppId ? 'pointer' : 'not-allowed'
-                  }}
-                >
-                  使用 Facebook 登入 / 註冊
-                </button>
-                {!facebookAppId && (
-                  <div style={{ fontSize: 12, color: '#555', lineHeight: 1.6 }}>
-                    尚未設定 <code>VITE_FACEBOOK_APP_ID</code>，所以無法呼叫 Facebook 登入 SDK。請至 Meta for Developers 建立應用程式並
-                    取得 App ID，然後寫入部署環境的 <code>.env</code>（或請管理者協助），即可啟用此按鈕。
-                  </div>
-                )}
+                    註冊 / 登入
+                  </button>
+                </form>
+                <p style={{ fontSize: 12, color: '#666', lineHeight: 1.6 }}>
+                  所有資料都只會儲存在你的瀏覽器中，包含帳號密碼與自訂的關聯圖。想重新開始時可清除瀏覽器資料或按登出。
+                </p>
               </div>
             )}
             {authNotice && <div style={{ fontSize: 12, color: '#555' }}>{authNotice}</div>}
