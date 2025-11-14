@@ -82,6 +82,9 @@ export default function App() {
   const clickCountsRef = useRef(loadStoredClickCounts());
   const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
+  const graphCacheRef = useRef({});
+  const inFlightPrefetchRef = useRef(new Set());
+  const activeRequestRef = useRef(0);
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
   const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
@@ -125,57 +128,142 @@ export default function App() {
     }
   };
 
-  const fetchGraph = async (centerWord, currentLang = language) => {
-    setLoading(true);
-    setErrorMessage('');
-
+  const getCustomSets = (centerWord, currentLang) => {
     const scopedKey = getScopedKey(currentLang, centerWord);
     const legacyCustomTerms = userData.current[centerWord] || [];
     const legacyDeletedTerms = deletedData.current[centerWord] || [];
     const customTerms = userData.current[scopedKey] || legacyCustomTerms;
     const deletedTerms = new Set(deletedData.current[scopedKey] || legacyDeletedTerms);
+    return { scopedKey, customTerms, deletedTerms };
+  };
 
-    let relatedEdges = [];
+  const buildGraphPayload = (centerWord, currentLang, relatedEdges, customTerms, deletedTerms) => {
+    const allRelated = Array.from(
+      new Set([
+        ...relatedEdges.map((item) => item.relatedTerm),
+        ...customTerms
+      ])
+    ).filter((term) => !deletedTerms.has(term));
+
+    return {
+      nodes: [
+        { id: centerWord, main: true },
+        ...allRelated.map((r) => ({ id: r }))
+      ],
+      links: [
+        ...relatedEdges.map(({ relatedTerm, edge }) => ({
+          source: centerWord,
+          target: relatedTerm,
+          weight: Math.max(1, (edge.weight || 1) * 2)
+        })),
+        ...customTerms
+          .filter((term) => !deletedTerms.has(term))
+          .map((term) => ({
+            source: centerWord,
+            target: term,
+            weight: 4
+          }))
+      ],
+      allRelated
+    };
+  };
+
+  const cacheGraphPayload = (scopedKey, payload) => {
+    graphCacheRef.current[scopedKey] = { ...payload, timestamp: Date.now() };
+  };
+
+  const applyGraphPayload = (payload, shouldReheat = true) => {
+    setGraphData({ nodes: payload.nodes, links: payload.links });
+    setAllLinks(payload.allRelated);
+    if (shouldReheat && fgRef.current) {
+      fgRef.current.d3ReheatSimulation();
+    }
+  };
+
+  const normalizeEdges = (edges, centerWord, currentLang, deletedTerms) =>
+    (edges || [])
+      .map((edge) => {
+        const startLabel = resolveTermLabel(edge.start);
+        const endLabel = resolveTermLabel(edge.end);
+
+        let relatedTerm = endLabel;
+        let relatedLanguage = edge.end?.language;
+
+        if (startLabel === centerWord && endLabel === centerWord) {
+          relatedTerm = '';
+        } else if (startLabel === centerWord) {
+          relatedTerm = endLabel;
+          relatedLanguage = edge.end?.language;
+        } else if (endLabel === centerWord) {
+          relatedTerm = startLabel;
+          relatedLanguage = edge.start?.language;
+        }
+
+        return {
+          relatedTerm,
+          relatedLanguage,
+          edge
+        };
+      })
+      .filter(({ relatedTerm, relatedLanguage }) => {
+        if (!relatedTerm || relatedTerm === centerWord) return false;
+        if (relatedLanguage && relatedLanguage !== currentLang) return false;
+        return !deletedTerms.has(relatedTerm);
+      })
+      .slice(0, 20);
+
+  const schedulePrefetch = (terms, currentLang) => {
+    terms.slice(0, 6).forEach((term) => {
+      const scopedKey = getScopedKey(currentLang, term);
+      if (graphCacheRef.current[scopedKey] || inFlightPrefetchRef.current.has(scopedKey)) return;
+      inFlightPrefetchRef.current.add(scopedKey);
+      setTimeout(async () => {
+        try {
+          const { customTerms, deletedTerms } = getCustomSets(term, currentLang);
+          const data = await fetchWithFallback(term, currentLang);
+          const normalized = normalizeEdges(data.edges, term, currentLang, deletedTerms);
+          const payload = buildGraphPayload(term, currentLang, normalized, customTerms, deletedTerms);
+          cacheGraphPayload(scopedKey, payload);
+        } catch (error) {
+          console.warn('Prefetch failed', term, currentLang, error);
+        } finally {
+          inFlightPrefetchRef.current.delete(scopedKey);
+        }
+      }, 0);
+    });
+  };
+
+  const fetchGraph = async (centerWord, currentLang = language) => {
+    setErrorMessage('');
+    const { scopedKey, customTerms, deletedTerms } = getCustomSets(centerWord, currentLang);
+    const cachedPayload = graphCacheRef.current[scopedKey];
+    if (cachedPayload) {
+      applyGraphPayload(cachedPayload, false);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
+    const requestId = ++activeRequestRef.current;
 
     try {
       const data = await fetchWithFallback(centerWord, currentLang);
+      if (activeRequestRef.current !== requestId) return;
       setStatusReport({
         ok: true,
         attempts: [],
         lastChecked: new Date().toISOString(),
         message: `成功連線 ConceptNet (${currentLang})`
       });
-      relatedEdges = (data.edges || [])
-        .map((edge) => {
-          const startLabel = resolveTermLabel(edge.start);
-          const endLabel = resolveTermLabel(edge.end);
-
-          let relatedTerm = endLabel;
-          let relatedLanguage = edge.end?.language;
-
-          if (startLabel === centerWord && endLabel === centerWord) {
-            relatedTerm = '';
-          } else if (startLabel === centerWord) {
-            relatedTerm = endLabel;
-            relatedLanguage = edge.end?.language;
-          } else if (endLabel === centerWord) {
-            relatedTerm = startLabel;
-            relatedLanguage = edge.start?.language;
-          }
-
-          return {
-            relatedTerm,
-            relatedLanguage,
-            edge
-          };
-        })
-        .filter(({ relatedTerm, relatedLanguage }) => {
-          if (!relatedTerm || relatedTerm === centerWord) return false;
-          if (relatedLanguage && relatedLanguage !== currentLang) return false;
-          return !deletedTerms.has(relatedTerm);
-        })
-        .slice(0, 20);
+      const relatedEdges = normalizeEdges(data.edges, centerWord, currentLang, deletedTerms);
+      const payload = buildGraphPayload(centerWord, currentLang, relatedEdges, customTerms, deletedTerms);
+      cacheGraphPayload(scopedKey, payload);
+      applyGraphPayload(payload);
+      refreshClickCountsSnapshot();
+      schedulePrefetch(payload.allRelated, currentLang);
+      setLoading(false);
     } catch (error) {
+      if (activeRequestRef.current !== requestId) return;
       console.error('探索失敗', error);
       setErrorMessage(`無法連到 ConceptNet (${currentLang})，僅顯示自訂關聯。錯誤：${error.message}`);
       setStatusReport({
@@ -184,44 +272,14 @@ export default function App() {
         lastChecked: new Date().toISOString(),
         message: `${currentLang}: ${error.message || '未知錯誤'}`
       });
+      setLoading(false);
     }
+  };
 
-    const allRelated = Array.from(
-      new Set([
-        ...relatedEdges.map((item) => item.relatedTerm),
-        ...customTerms
-      ])
-    ).filter((term) => !deletedTerms.has(term));
-
-    const newNodes = [
-      { id: centerWord, main: true },
-      ...allRelated.map((r) => ({ id: r }))
-    ];
-
-    const newLinks = [
-      ...relatedEdges.map(({ relatedTerm, edge }) => ({
-        source: centerWord,
-        target: relatedTerm,
-        weight: Math.max(1, (edge.weight || 1) * 2)
-      })),
-      ...customTerms
-        .filter((term) => !deletedTerms.has(term))
-        .map((term) => ({
-          source: centerWord,
-          target: term,
-          weight: 4
-        }))
-    ];
-
-    setGraphData({ nodes: newNodes, links: newLinks });
-    setAllLinks(allRelated);
-
-    if (fgRef.current) {
-      fgRef.current.d3ReheatSimulation();
+  const invalidateCache = (scopedKey) => {
+    if (graphCacheRef.current[scopedKey]) {
+      delete graphCacheRef.current[scopedKey];
     }
-
-    refreshClickCountsSnapshot();
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -248,8 +306,8 @@ export default function App() {
     if (addMode) return;
     recordNodeClick(node.id, language);
     setHistory((prev) => [...prev, { keyword, language }]);
-    fetchGraph(node.id, language);
     setKeyword(node.id);
+    fetchGraph(node.id, language);
   };
 
   const addCustomRelation = () => {
@@ -269,6 +327,7 @@ export default function App() {
 
     setInputValue('');
     setAddMode(false);
+    invalidateCache(scopedKey);
     fetchGraph(current, language);
   };
 
@@ -281,6 +340,7 @@ export default function App() {
     }
     localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
+    invalidateCache(scopedKey);
     fetchGraph(current, language);
   };
 
@@ -321,6 +381,8 @@ export default function App() {
       deletedData.current = payload.deletedGraphData;
       localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
     }
+
+    graphCacheRef.current = {};
 
     setImportNotice({ type: 'success', message: successMessage });
     fetchGraph(keyword, language);
