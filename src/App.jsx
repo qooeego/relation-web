@@ -37,6 +37,20 @@ const providerLabels = {
 const conceptNetUrl = (keyword, language) =>
   `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
 
+const extractJsonFromText = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      const possibleJson = text.slice(firstBrace, lastBrace + 1);
+      return JSON.parse(possibleJson);
+    }
+    throw error;
+  }
+};
+
 const fallbackEndpoints = [
   {
     label: 'conceptnet.io',
@@ -47,6 +61,22 @@ const fallbackEndpoints = [
     label: 'cors.isomorphic-git.org',
     build: (keyword, language) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword, language)}`,
     parser: (response) => response.json()
+  },
+  {
+    label: 'corsproxy.org',
+    build: (keyword, language) =>
+      `https://corsproxy.org/?${encodeURIComponent(conceptNetUrl(keyword, language))}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'proxy.cors.sh',
+    build: (keyword, language) => `https://proxy.cors.sh/${conceptNetUrl(keyword, language)}`,
+    parser: (response) => response.json(),
+    init: () => ({
+      headers: {
+        'x-cors-api-key': 'temp_d4e5a6b7c8d9e0f1g2h3i4j5'
+      }
+    })
   },
   {
     label: 'thingproxy.freeboard.io',
@@ -64,11 +94,10 @@ const fallbackEndpoints = [
     build: (keyword, language) =>
       `https://r.jina.ai/http://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`,
     parser: async (response) => {
-      const text = await response.text();
       try {
-        return JSON.parse(text);
+        return extractJsonFromText(await response.text());
       } catch (error) {
-        throw new Error('Mirror JSON 解析失敗');
+        throw new Error(`Mirror JSON 解析失敗: ${error.message}`);
       }
     }
   }
@@ -81,7 +110,11 @@ const fetchWithFallback = async (keyword, language) => {
   for (const endpoint of fallbackEndpoints) {
     const targetUrl = endpoint.build(keyword, language);
     try {
-      const response = await fetch(targetUrl);
+      const init =
+        typeof endpoint.init === 'function'
+          ? endpoint.init(keyword, language)
+          : endpoint.init || undefined;
+      const response = await fetch(targetUrl, init);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
