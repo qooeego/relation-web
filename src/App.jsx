@@ -2,20 +2,25 @@ import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
 const defaultInputPos = { x: window.innerWidth / 2 - 100, y: 150 };
-const conceptNetUrl = (keyword) => `https://api.conceptnet.io/c/zh/${encodeURIComponent(keyword)}`;
+const supportedLanguages = [
+  { value: 'zh', label: '中文 (zh)' },
+  { value: 'en', label: 'English (en)' }
+];
+const conceptNetUrl = (keyword, language) =>
+  `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
 const proxyUrlFactories = [
-  (keyword) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword)}`,
-  (keyword) => `https://thingproxy.freeboard.io/fetch/${conceptNetUrl(keyword)}`,
-  (keyword) => `https://api.allorigins.win/raw?url=${encodeURIComponent(conceptNetUrl(keyword))}`
+  (keyword, language) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword, language)}`,
+  (keyword, language) => `https://thingproxy.freeboard.io/fetch/${conceptNetUrl(keyword, language)}`,
+  (keyword, language) => `https://api.allorigins.win/raw?url=${encodeURIComponent(conceptNetUrl(keyword, language))}`
 ];
 
-const fetchWithFallback = async (keyword) => {
+const fetchWithFallback = async (keyword, language) => {
   const urlFactories = [conceptNetUrl, ...proxyUrlFactories];
   const attempts = [];
   let lastError;
 
   for (const builder of urlFactories) {
-    const targetUrl = builder(keyword);
+    const targetUrl = builder(keyword, language);
     try {
       const response = await fetch(targetUrl);
       if (!response.ok) {
@@ -50,6 +55,7 @@ const downloadJson = (data, filename) => {
 export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [keyword, setKeyword] = useState('狗');
+  const [language, setLanguage] = useState(() => localStorage.getItem('conceptNetLanguage') || 'zh');
   const [loading, setLoading] = useState(false);
   const [addMode, setAddMode] = useState(false);
   const [inputPos, setInputPos] = useState(defaultInputPos);
@@ -67,43 +73,82 @@ export default function App() {
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
   const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
 
-  const fetchGraph = async (centerWord) => {
+  const resolveTermLabel = (concept) => {
+    if (!concept) return '';
+    if (concept.label) return concept.label;
+    if (concept.term) {
+      const parts = concept.term.split('/');
+      return parts[parts.length - 1];
+    }
+    return '';
+  };
+
+  const getScopedKey = (currentLang, centerWord) => `${currentLang}:${centerWord}`;
+
+  const fetchGraph = async (centerWord, currentLang = language) => {
     setLoading(true);
     setErrorMessage('');
 
-    const customTerms = userData.current[centerWord] || [];
-    const deletedTerms = new Set(deletedData.current[centerWord] || []);
+    const scopedKey = getScopedKey(currentLang, centerWord);
+    const legacyCustomTerms = userData.current[centerWord] || [];
+    const legacyDeletedTerms = deletedData.current[centerWord] || [];
+    const customTerms = userData.current[scopedKey] || legacyCustomTerms;
+    const deletedTerms = new Set(deletedData.current[scopedKey] || legacyDeletedTerms);
 
     let relatedEdges = [];
 
     try {
-      const data = await fetchWithFallback(centerWord);
-      setStatusReport({ ok: true, attempts: [], lastChecked: new Date().toISOString(), message: '成功連線 ConceptNet' });
+      const data = await fetchWithFallback(centerWord, currentLang);
+      setStatusReport({
+        ok: true,
+        attempts: [],
+        lastChecked: new Date().toISOString(),
+        message: `成功連線 ConceptNet (${currentLang})`
+      });
       relatedEdges = (data.edges || [])
-        .filter((edge) => {
-          const endLabel = edge.end?.label || edge.end?.term;
-          return (
-            endLabel &&
-            endLabel !== centerWord &&
-            /^[一-龥]+$/.test(endLabel) &&
-            !deletedTerms.has(endLabel)
-          );
+        .map((edge) => {
+          const startLabel = resolveTermLabel(edge.start);
+          const endLabel = resolveTermLabel(edge.end);
+
+          let relatedTerm = endLabel;
+          let relatedLanguage = edge.end?.language;
+
+          if (startLabel === centerWord && endLabel === centerWord) {
+            relatedTerm = '';
+          } else if (startLabel === centerWord) {
+            relatedTerm = endLabel;
+            relatedLanguage = edge.end?.language;
+          } else if (endLabel === centerWord) {
+            relatedTerm = startLabel;
+            relatedLanguage = edge.start?.language;
+          }
+
+          return {
+            relatedTerm,
+            relatedLanguage,
+            edge
+          };
+        })
+        .filter(({ relatedTerm, relatedLanguage }) => {
+          if (!relatedTerm || relatedTerm === centerWord) return false;
+          if (relatedLanguage && relatedLanguage !== currentLang) return false;
+          return !deletedTerms.has(relatedTerm);
         })
         .slice(0, 20);
     } catch (error) {
       console.error('探索失敗', error);
-      setErrorMessage(`無法連到 ConceptNet，僅顯示自訂關聯。錯誤：${error.message}`);
+      setErrorMessage(`無法連到 ConceptNet (${currentLang})，僅顯示自訂關聯。錯誤：${error.message}`);
       setStatusReport({
         ok: false,
         attempts: error.attempts || [],
         lastChecked: new Date().toISOString(),
-        message: error.message || '未知錯誤'
+        message: `${currentLang}: ${error.message || '未知錯誤'}`
       });
     }
 
     const allRelated = Array.from(
       new Set([
-        ...relatedEdges.map((e) => e.end?.label || e.end?.term),
+        ...relatedEdges.map((item) => item.relatedTerm),
         ...customTerms
       ])
     ).filter((term) => !deletedTerms.has(term));
@@ -114,10 +159,10 @@ export default function App() {
     ];
 
     const newLinks = [
-      ...relatedEdges.map((edge) => ({
+      ...relatedEdges.map(({ relatedTerm, edge }) => ({
         source: centerWord,
-        target: edge.end?.label || edge.end?.term,
-        weight: Math.max(1, edge.weight * 2)
+        target: relatedTerm,
+        weight: Math.max(1, (edge.weight || 1) * 2)
       })),
       ...customTerms
         .filter((term) => !deletedTerms.has(term))
@@ -139,44 +184,46 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchGraph(keyword);
-  }, []);
+    fetchGraph(keyword, language);
+  }, [language]);
 
   const handleClickNode = (node) => {
     if (addMode) return;
-    setHistory((prev) => [...prev, keyword]);
-    fetchGraph(node.id);
+    setHistory((prev) => [...prev, { keyword, language }]);
+    fetchGraph(node.id, language);
     setKeyword(node.id);
   };
 
   const addCustomRelation = () => {
     if (!inputValue.trim()) return;
     const current = keyword;
+    const scopedKey = getScopedKey(language, current);
     const newTerm = inputValue.trim();
 
-    userData.current[current] = userData.current[current] || [];
-    if (!userData.current[current].includes(newTerm)) {
-      userData.current[current].push(newTerm);
+    userData.current[scopedKey] = userData.current[scopedKey] || [];
+    if (!userData.current[scopedKey].includes(newTerm)) {
+      userData.current[scopedKey].push(newTerm);
     }
     localStorage.setItem('userGraphData', JSON.stringify(userData.current));
 
-    deletedData.current[current] = (deletedData.current[current] || []).filter(t => t !== newTerm);
+    deletedData.current[scopedKey] = (deletedData.current[scopedKey] || []).filter((t) => t !== newTerm);
     localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
     setInputValue('');
     setAddMode(false);
-    fetchGraph(current);
+    fetchGraph(current, language);
   };
 
   const deleteAnyRelation = (term) => {
     const current = keyword;
-    deletedData.current[current] = deletedData.current[current] || [];
-    if (!deletedData.current[current].includes(term)) {
-      deletedData.current[current].push(term);
+    const scopedKey = getScopedKey(language, current);
+    deletedData.current[scopedKey] = deletedData.current[scopedKey] || [];
+    if (!deletedData.current[scopedKey].includes(term)) {
+      deletedData.current[scopedKey].push(term);
     }
     localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
-    fetchGraph(current);
+    fetchGraph(current, language);
   };
 
   const handleBack = () => {
@@ -184,8 +231,14 @@ export default function App() {
     const prev = [...history];
     const last = prev.pop();
     setHistory(prev);
-    setKeyword(last);
-    fetchGraph(last);
+    if (!last) return;
+    setKeyword(last.keyword);
+    if (last.language && last.language !== language) {
+      setLanguage(last.language);
+      localStorage.setItem('conceptNetLanguage', last.language);
+    } else {
+      fetchGraph(last.keyword, last.language || language);
+    }
   };
 
   const exportCustomData = () => {
@@ -215,7 +268,7 @@ export default function App() {
         localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
       }
       setImportNotice({ type: 'success', message: '匯入成功！重新整理圖譜中。' });
-      fetchGraph(keyword);
+      fetchGraph(keyword, language);
     } catch (error) {
       console.error('匯入自訂資料失敗', error);
       setImportNotice({ type: 'error', message: `匯入失敗：${error.message}` });
@@ -224,7 +277,11 @@ export default function App() {
 
   const renderStatusAttempts = () => {
     if (statusReport.ok) {
-      return <p style={{ margin: '0.5rem 0' }}>最近一次已成功連線 ConceptNet，可以直接探索官方資料。</p>;
+      return (
+        <p style={{ margin: '0.5rem 0' }}>
+          最近一次已成功連線 ConceptNet（{language.toUpperCase()}），可以直接探索官方資料。
+        </p>
+      );
     }
 
     if (!statusReport.attempts.length) {
@@ -246,11 +303,24 @@ export default function App() {
         <input
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
-          placeholder="輸入關鍵字"
+          placeholder={language === 'en' ? 'Enter a keyword' : '輸入關鍵字'}
           style={{ fontSize: '1rem', padding: '0.5rem', border: '1px solid #ccc', borderRadius: '4px', outline: 'none' }}
         />
+        <select
+          value={language}
+          onChange={(e) => {
+            const nextLang = e.target.value;
+            setLanguage(nextLang);
+            localStorage.setItem('conceptNetLanguage', nextLang);
+          }}
+          style={{ padding: '0.5rem', borderRadius: 4, border: '1px solid #ccc' }}
+        >
+          {supportedLanguages.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
         <button
-          onClick={() => fetchGraph(keyword)}
+          onClick={() => fetchGraph(keyword, language)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >探索</button>
         <button
@@ -322,7 +392,7 @@ export default function App() {
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') addCustomRelation(); }}
-          placeholder="輸入新詞按 Enter"
+          placeholder={language === 'en' ? 'Enter a new term and press Enter' : '輸入新詞按 Enter'}
         />
       )}
 
@@ -342,7 +412,7 @@ export default function App() {
           <div>
             <strong>自訂資料庫工具</strong>
             <p style={{ fontSize: 12, color: '#555' }}>
-              所有自訂關聯都儲存在瀏覽器的 localStorage。若你想建立自己的資料庫，可以匯出後備份或手動編輯 JSON 再匯入。
+              所有自訂關聯都儲存在瀏覽器的 localStorage（鍵值格式為「語言:關鍵詞」，例如 zh:狗）。若你想建立自己的資料庫，可以匯出後備份或手動編輯 JSON 再匯入。
             </p>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: 8 }}>
               <button onClick={exportCustomData} style={{ padding: '0.3rem 0.75rem', borderRadius: 4, border: '1px solid #27ae60', background: '#27ae60', color: '#fff' }}>⬇️ 匯出 JSON</button>
@@ -372,6 +442,12 @@ export default function App() {
           </p>
           <p style={{ margin: '0.5rem 0' }}>{statusReport.message || '尚未偵測到錯誤。'}</p>
           {renderStatusAttempts()}
+          <p style={{ margin: '0.5rem 0', fontSize: 12, color: '#333' }}>
+            目前語言：<strong>{language.toUpperCase()}</strong> · 查詢網址：
+            <a href={conceptNetUrl(keyword || '', language)} target="_blank" rel="noreferrer" style={{ marginLeft: 4 }}>
+              /query?node=/c/{language}/{keyword || '…'}
+            </a>
+          </p>
           <p style={{ marginTop: 12, fontSize: 13 }}>
             ConceptNet 是免費的研究專案，偶爾會維護或被地區性網路封鎖。你可以等候官方 API 恢復，或透過上方的「自訂資料庫工具」建立 / 匯入自己的關聯資料庫，同時繼續新增節點。
           </p>
