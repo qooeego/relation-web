@@ -11,6 +11,7 @@ const proxyUrlFactories = [
 
 const fetchWithFallback = async (keyword) => {
   const urlFactories = [conceptNetUrl, ...proxyUrlFactories];
+  const attempts = [];
   let lastError;
 
   for (const builder of urlFactories) {
@@ -18,16 +19,18 @@ const fetchWithFallback = async (keyword) => {
     try {
       const response = await fetch(targetUrl);
       if (!response.ok) {
-        throw new Error(`ConceptNet 回應碼 ${response.status}`);
+        throw new Error(`HTTP ${response.status}`);
       }
       const data = await response.json();
       return data;
     } catch (error) {
+      attempts.push(`${new URL(targetUrl).host}: ${error.message}`);
       lastError = error;
     }
   }
 
-  throw lastError || new Error('ConceptNet 請求失敗');
+  const detail = attempts.length ? `(${attempts.join('，')})` : '';
+  throw new Error(`ConceptNet 請求失敗 ${detail}`.trim());
 };
 
 export default function App() {
@@ -70,7 +73,7 @@ export default function App() {
         .slice(0, 20);
     } catch (error) {
       console.error('探索失敗', error);
-      setErrorMessage('無法連到 ConceptNet，僅顯示自訂關聯。');
+      setErrorMessage(`無法連到 ConceptNet，僅顯示自訂關聯。錯誤：${error.message}`);
     }
 
     const allRelated = Array.from(
