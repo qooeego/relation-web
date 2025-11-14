@@ -54,7 +54,8 @@ const supportedLanguages = [
 const googleClientId =
   import.meta.env.VITE_GOOGLE_CLIENT_ID ||
   '164342953108-7i09t4spu6hsois0svtph7fh55fasdsf.apps.googleusercontent.com';
-const facebookAppId = import.meta.env.VITE_FACEBOOK_APP_ID;
+const facebookAppId =
+  import.meta.env.VITE_FACEBOOK_APP_ID || '2834341560104833';
 const providerLabels = {
   google: 'Google',
   facebook: 'Facebook'
