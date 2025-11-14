@@ -1,59 +1,280 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
+const loadScript = (id, src) =>
+  new Promise((resolve, reject) => {
+    if (typeof document === 'undefined') {
+      reject(new Error('無法在非瀏覽器環境載入外部腳本'));
+      return;
+    }
+    if (document.getElementById(id)) {
+      resolve();
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = id;
+    script.src = src;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`載入 ${src} 失敗`));
+    document.body.appendChild(script);
+  });
+
+const decodeJwtPayload = (token) => {
+  try {
+    const [, payload] = token.split('.');
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = decodeURIComponent(
+      atob(normalized)
+        .split('')
+        .map((char) => `%${`00${char.charCodeAt(0).toString(16)}`.slice(-2)}`)
+        .join('')
+    );
+    return JSON.parse(decoded);
+  } catch (error) {
+    console.warn('解析 JWT 失敗', error);
+    return null;
+  }
+};
+
+const loadStoredMemberProfile = () => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return JSON.parse(localStorage.getItem('memberProfile'));
+  } catch {
+    return null;
+  }
+};
+
+const defaultInputPos = { x: window.innerWidth / 2 - 100, y: 150 };
+const supportedLanguages = [
+  { value: 'zh', label: '中文 (zh)' },
+  { value: 'en', label: 'English (en)' }
+];
+const googleClientId =
+  import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+  '164342953108-7i09t4spu6hsois0svtph7fh55fasdsf.apps.googleusercontent.com';
+const facebookAppId =
+  import.meta.env.VITE_FACEBOOK_APP_ID || '2834341560104833';
+const providerLabels = {
+  google: 'Google',
+  facebook: 'Facebook'
+};
+const conceptNetUrl = (keyword, language) =>
+  `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
+
+const fallbackEndpoints = [
+  {
+    label: 'conceptnet.io',
+    build: conceptNetUrl,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'cors.isomorphic-git.org',
+    build: (keyword, language) => `https://cors.isomorphic-git.org/${conceptNetUrl(keyword, language)}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'thingproxy.freeboard.io',
+    build: (keyword, language) => `https://thingproxy.freeboard.io/fetch/${conceptNetUrl(keyword, language)}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'api.allorigins.win',
+    build: (keyword, language) =>
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(conceptNetUrl(keyword, language))}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'r.jina.ai mirror',
+    build: (keyword, language) =>
+      `https://r.jina.ai/http://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`,
+    parser: async (response) => {
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        throw new Error('Mirror JSON 解析失敗');
+      }
+    }
+  }
+];
+
+const fetchWithFallback = async (keyword, language) => {
+  const attempts = [];
+  let lastError;
+
+  for (const endpoint of fallbackEndpoints) {
+    const targetUrl = endpoint.build(keyword, language);
+    try {
+      const response = await fetch(targetUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await endpoint.parser(response);
+      return data;
+    } catch (error) {
+      try {
+        attempts.push(`${endpoint.label || new URL(targetUrl).host}: ${error.message}`);
+      } catch {
+        attempts.push(`${endpoint.label || targetUrl}: ${error.message}`);
+      }
+      lastError = error;
+    }
+  }
+
+  const detail = attempts.length ? `(${attempts.join('，')})` : '';
+  const finalError = new Error(`ConceptNet 請求失敗 ${detail}`.trim());
+  finalError.attempts = attempts;
+  throw finalError;
+};
+
+const loadStoredClickCounts = () => {
+  if (typeof window === 'undefined') return {};
+  try {
+    return JSON.parse(localStorage.getItem('nodeClickCounts')) || {};
+  } catch (error) {
+    console.warn('Failed to parse node click counts', error);
+    return {};
+  }
+};
+
+const downloadJson = (data, filename) => {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
 export default function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [keyword, setKeyword] = useState('狗');
+  const [language, setLanguage] = useState(() => localStorage.getItem('conceptNetLanguage') || 'zh');
   const [loading, setLoading] = useState(false);
   const [addMode, setAddMode] = useState(false);
-  const [inputPos, setInputPos] = useState({ x: window.innerWidth / 2 - 100, y: 150 });
+  const [inputPos, setInputPos] = useState(defaultInputPos);
   const [inputValue, setInputValue] = useState('');
   const [allLinks, setAllLinks] = useState([]);
   const [history, setHistory] = useState([]);
   const [showPanel, setShowPanel] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [statusReport, setStatusReport] = useState({ ok: true, attempts: [], lastChecked: null, message: '' });
+  const [showStatusPanel, setShowStatusPanel] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importNotice, setImportNotice] = useState(null);
+  const [isDragOverImport, setIsDragOverImport] = useState(false);
+  const [memberProfile, setMemberProfile] = useState(loadStoredMemberProfile);
+  const [authNotice, setAuthNotice] = useState('');
+  const [googleReady, setGoogleReady] = useState(false);
+  const [facebookReady, setFacebookReady] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const clickCountsRef = useRef(loadStoredClickCounts());
+  const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
+  const graphCacheRef = useRef({});
+  const inFlightPrefetchRef = useRef(new Set());
+  const activeRequestRef = useRef(0);
+  const googleButtonRef = useRef(null);
+  const googleInitializedRef = useRef(false);
+  const fbInitRef = useRef(false);
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
   const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
 
-  const fetchGraph = async (centerWord) => {
-    setLoading(true);
+  const resolveTermLabel = (concept) => {
+    if (!concept) return '';
+    if (concept.label) return concept.label;
+    if (concept.term) {
+      const parts = concept.term.split('/');
+      return parts[parts.length - 1];
+    }
+    return '';
+  };
+
+  const getScopedKey = (currentLang, centerWord) => `${currentLang}:${centerWord}`;
+
+  const getEndpointId = (endpoint) => {
+    if (!endpoint) return '';
+    return typeof endpoint === 'string' ? endpoint : endpoint.id || '';
+  };
+
+  const resolveNeighborId = (link, focusId) => {
+    if (!link) return '';
+    const targetId = getEndpointId(link.target);
+    if (targetId && targetId !== focusId) return targetId;
+    const sourceId = getEndpointId(link.source);
+    if (sourceId && sourceId !== focusId) return sourceId;
+    return targetId || sourceId || '';
+  };
+
+  const refreshClickCountsSnapshot = () => {
+    const latest = loadStoredClickCounts();
+    clickCountsRef.current = latest;
+    setClickCountsSnapshot(latest);
+  };
+
+  const applyMemberProfile = (profile) => {
+    if (!profile) return;
+    const normalizedProfile = {
+      provider: profile.provider,
+      name: profile.name,
+      email: profile.email,
+      avatar: profile.avatar,
+      id: profile.id,
+      lastLoginAt: new Date().toISOString()
+    };
+    setMemberProfile(normalizedProfile);
     try {
-      const res = await fetch(`https://api.conceptnet.io/c/zh/${encodeURIComponent(centerWord)}`);
-      const data = await res.json();
+      localStorage.setItem('memberProfile', JSON.stringify(normalizedProfile));
+    } catch {}
+  };
 
-      const customTerms = userData.current[centerWord] || [];
-      const deletedTerms = new Set(deletedData.current[centerWord] || []);
+  const clearMemberProfile = () => {
+    setMemberProfile(null);
+    try {
+      localStorage.removeItem('memberProfile');
+    } catch {}
+  };
 
-      const relatedEdges = data.edges
-        .filter((edge) => {
-          const endLabel = edge.end?.label || edge.end?.term;
-          return (
-            endLabel &&
-            endLabel !== centerWord &&
-            /^[一-龥]+$/.test(endLabel) &&
-            !deletedTerms.has(endLabel)
-          );
-        })
-        .slice(0, 20);
+  const persistClickCounts = (nextCounts) => {
+    clickCountsRef.current = nextCounts;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('nodeClickCounts', JSON.stringify(nextCounts));
+    }
+  };
 
-      const allRelated = Array.from(
-        new Set([
-          ...relatedEdges.map((e) => e.end?.label || e.end?.term),
-          ...customTerms
-        ])
-      ).filter((term) => !deletedTerms.has(term));
+  const getCustomSets = (centerWord, currentLang) => {
+    const scopedKey = getScopedKey(currentLang, centerWord);
+    const legacyCustomTerms = userData.current[centerWord] || [];
+    const legacyDeletedTerms = deletedData.current[centerWord] || [];
+    const customTerms = userData.current[scopedKey] || legacyCustomTerms;
+    const deletedTerms = new Set(deletedData.current[scopedKey] || legacyDeletedTerms);
+    return { scopedKey, customTerms, deletedTerms };
+  };
 
-      const newNodes = [
+  const buildGraphPayload = (centerWord, currentLang, relatedEdges, customTerms, deletedTerms) => {
+    const allRelated = Array.from(
+      new Set([
+        ...relatedEdges.map((item) => item.relatedTerm),
+        ...customTerms
+      ])
+    ).filter((term) => !deletedTerms.has(term));
+
+    return {
+      nodes: [
         { id: centerWord, main: true },
         ...allRelated.map((r) => ({ id: r }))
-      ];
-
-      const newLinks = [
-        ...relatedEdges.map((edge) => ({
+      ],
+      links: [
+        ...relatedEdges.map(({ relatedTerm, edge }) => ({
           source: centerWord,
-          target: edge.end?.label || edge.end?.term,
-          weight: Math.max(1, edge.weight * 2)
+          target: relatedTerm,
+          weight: Math.max(1, (edge.weight || 1) * 2)
         })),
         ...customTerms
           .filter((term) => !deletedTerms.has(term))
@@ -62,60 +283,317 @@ export default function App() {
             target: term,
             weight: 4
           }))
-      ];
+      ],
+      allRelated
+    };
+  };
 
-      setGraphData({ nodes: newNodes, links: newLinks });
-      setAllLinks(allRelated);
+  const cacheGraphPayload = (scopedKey, payload) => {
+    graphCacheRef.current[scopedKey] = { ...payload, timestamp: Date.now() };
+  };
 
-      if (fgRef.current) {
-        fgRef.current.d3ReheatSimulation();
-      }
-    } catch (e) {
-      console.error('探索失敗', e);
+  const applyGraphPayload = (payload, shouldReheat = true) => {
+    setGraphData({ nodes: payload.nodes, links: payload.links });
+    setAllLinks(payload.allRelated);
+    if (shouldReheat && fgRef.current) {
+      fgRef.current.d3ReheatSimulation();
     }
-    setLoading(false);
+  };
+
+  const normalizeEdges = (edges, centerWord, currentLang, deletedTerms) =>
+    (edges || [])
+      .map((edge) => {
+        const startLabel = resolveTermLabel(edge.start);
+        const endLabel = resolveTermLabel(edge.end);
+
+        let relatedTerm = endLabel;
+        let relatedLanguage = edge.end?.language;
+
+        if (startLabel === centerWord && endLabel === centerWord) {
+          relatedTerm = '';
+        } else if (startLabel === centerWord) {
+          relatedTerm = endLabel;
+          relatedLanguage = edge.end?.language;
+        } else if (endLabel === centerWord) {
+          relatedTerm = startLabel;
+          relatedLanguage = edge.start?.language;
+        }
+
+        return {
+          relatedTerm,
+          relatedLanguage,
+          edge
+        };
+      })
+      .filter(({ relatedTerm, relatedLanguage }) => {
+        if (!relatedTerm || relatedTerm === centerWord) return false;
+        if (relatedLanguage && relatedLanguage !== currentLang) return false;
+        return !deletedTerms.has(relatedTerm);
+      })
+      .slice(0, 20);
+
+  const schedulePrefetch = (terms, currentLang) => {
+    terms.slice(0, 6).forEach((term) => {
+      const scopedKey = getScopedKey(currentLang, term);
+      if (graphCacheRef.current[scopedKey] || inFlightPrefetchRef.current.has(scopedKey)) return;
+      inFlightPrefetchRef.current.add(scopedKey);
+      setTimeout(async () => {
+        try {
+          const { customTerms, deletedTerms } = getCustomSets(term, currentLang);
+          const data = await fetchWithFallback(term, currentLang);
+          const normalized = normalizeEdges(data.edges, term, currentLang, deletedTerms);
+          const payload = buildGraphPayload(term, currentLang, normalized, customTerms, deletedTerms);
+          cacheGraphPayload(scopedKey, payload);
+        } catch (error) {
+          console.warn('Prefetch failed', term, currentLang, error);
+        } finally {
+          inFlightPrefetchRef.current.delete(scopedKey);
+        }
+      }, 0);
+    });
+  };
+
+  const fetchGraph = async (centerWord, currentLang = language) => {
+    setErrorMessage('');
+    const { scopedKey, customTerms, deletedTerms } = getCustomSets(centerWord, currentLang);
+    const cachedPayload = graphCacheRef.current[scopedKey];
+    if (cachedPayload) {
+      applyGraphPayload(cachedPayload, false);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
+    const requestId = ++activeRequestRef.current;
+
+    try {
+      const data = await fetchWithFallback(centerWord, currentLang);
+      if (activeRequestRef.current !== requestId) return;
+      setStatusReport({
+        ok: true,
+        attempts: [],
+        lastChecked: new Date().toISOString(),
+        message: `成功連線 ConceptNet (${currentLang})`
+      });
+      const relatedEdges = normalizeEdges(data.edges, centerWord, currentLang, deletedTerms);
+      const payload = buildGraphPayload(centerWord, currentLang, relatedEdges, customTerms, deletedTerms);
+      cacheGraphPayload(scopedKey, payload);
+      applyGraphPayload(payload);
+      refreshClickCountsSnapshot();
+      schedulePrefetch(payload.allRelated, currentLang);
+      setLoading(false);
+    } catch (error) {
+      if (activeRequestRef.current !== requestId) return;
+      console.error('探索失敗', error);
+      setErrorMessage(`無法連到 ConceptNet (${currentLang})，僅顯示自訂關聯。錯誤：${error.message}`);
+      setStatusReport({
+        ok: false,
+        attempts: error.attempts || [],
+        lastChecked: new Date().toISOString(),
+        message: `${currentLang}: ${error.message || '未知錯誤'}`
+      });
+      const fallbackPayload = buildGraphPayload(centerWord, currentLang, [], customTerms, deletedTerms);
+      cacheGraphPayload(scopedKey, fallbackPayload);
+      applyGraphPayload(fallbackPayload);
+      setLoading(false);
+    }
+  };
+
+  const invalidateCache = (scopedKey) => {
+    if (graphCacheRef.current[scopedKey]) {
+      delete graphCacheRef.current[scopedKey];
+    }
   };
 
   useEffect(() => {
-    fetchGraph(keyword);
-  }, []);
+    fetchGraph(keyword, language);
+  }, [language]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!googleClientId) return () => {};
+    if (googleReady || typeof window === 'undefined') return () => {};
+
+    loadScript('google-identity-service', 'https://accounts.google.com/gsi/client')
+      .then(() => {
+        if (!cancelled) {
+          setGoogleReady(true);
+        }
+      })
+      .catch((error) => {
+        console.error('載入 Google Identity Service 失敗', error);
+        if (!cancelled) {
+          setAuthNotice('無法載入 Google 登入服務，請檢查網路或 client id 設定。');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [googleClientId, googleReady]);
+
+  useEffect(() => {
+    if (!googleReady || googleInitializedRef.current) return;
+    if (!googleClientId || typeof window === 'undefined' || !window.google?.accounts?.id) return;
+    window.google.accounts.id.initialize({
+      client_id: googleClientId,
+      callback: (response) => {
+        if (!response?.credential) {
+          setAuthNotice('Google 未回傳憑證，請再試一次。');
+          return;
+        }
+        const payload = decodeJwtPayload(response.credential);
+        if (!payload) {
+          setAuthNotice('無法解析 Google 回傳的資料。');
+          return;
+        }
+        applyMemberProfile({
+          provider: 'google',
+          name: payload.name,
+          email: payload.email,
+          avatar: payload.picture,
+          id: payload.sub
+        });
+        setAuthNotice('已透過 Google 登入');
+      }
+    });
+    googleInitializedRef.current = true;
+  }, [googleClientId, googleReady]);
+
+  useEffect(() => {
+    if (!googleReady || !showAuthModal) return;
+    if (!googleButtonRef.current) return;
+    if (!window.google?.accounts?.id) return;
+    googleButtonRef.current.innerHTML = '';
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      theme: 'outline',
+      size: 'medium',
+      text: 'signin_with'
+    });
+  }, [googleReady, showAuthModal]);
+
+  useEffect(() => {
+    if (!facebookAppId || fbInitRef.current || typeof window === 'undefined') return;
+    window.fbAsyncInit = () => {
+      window.FB.init({
+        appId: facebookAppId,
+        cookie: true,
+        xfbml: false,
+        version: 'v19.0'
+      });
+      setFacebookReady(true);
+      fbInitRef.current = true;
+    };
+    loadScript('facebook-jssdk', 'https://connect.facebook.net/en_US/sdk.js').catch((error) => {
+      console.error('載入 Facebook SDK 失敗', error);
+      setAuthNotice('Facebook SDK 載入失敗，請確認 app id 是否正確。');
+    });
+  }, [facebookAppId]);
+
+  useEffect(() => {
+    if (!showAuthModal) {
+      setAuthNotice('');
+    }
+  }, [showAuthModal]);
+
+  const recordNodeClick = (nodeId, currentLang = language) => {
+    if (!nodeId) return;
+    const scopedKey = getScopedKey(currentLang, nodeId);
+    const next = {
+      ...clickCountsRef.current,
+      [scopedKey]: (clickCountsRef.current[scopedKey] || 0) + 1
+    };
+    persistClickCounts(next);
+  };
+
+  const getNodeClickCount = (term, currentLang = language) => {
+    if (!term) return 0;
+    const scopedKey = getScopedKey(currentLang, term);
+    return clickCountsSnapshot[scopedKey] || 0;
+  };
 
   const handleClickNode = (node) => {
     if (addMode) return;
-    setHistory((prev) => [...prev, keyword]);
-    fetchGraph(node.id);
+    recordNodeClick(node.id, language);
+    setHistory((prev) => [...prev, { keyword, language }]);
     setKeyword(node.id);
+    fetchGraph(node.id, language);
   };
 
   const addCustomRelation = () => {
     if (!inputValue.trim()) return;
     const current = keyword;
+    const scopedKey = getScopedKey(language, current);
     const newTerm = inputValue.trim();
 
-    userData.current[current] = userData.current[current] || [];
-    if (!userData.current[current].includes(newTerm)) {
-      userData.current[current].push(newTerm);
+    userData.current[scopedKey] = userData.current[scopedKey] || [];
+    if (!userData.current[scopedKey].includes(newTerm)) {
+      userData.current[scopedKey].push(newTerm);
     }
     localStorage.setItem('userGraphData', JSON.stringify(userData.current));
 
-    deletedData.current[current] = (deletedData.current[current] || []).filter(t => t !== newTerm);
+    deletedData.current[scopedKey] = (deletedData.current[scopedKey] || []).filter((t) => t !== newTerm);
     localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
     setInputValue('');
     setAddMode(false);
-    setInputPos(null);
-    fetchGraph(current);
+    invalidateCache(scopedKey);
+    fetchGraph(current, language);
   };
 
   const deleteAnyRelation = (term) => {
     const current = keyword;
-    deletedData.current[current] = deletedData.current[current] || [];
-    if (!deletedData.current[current].includes(term)) {
-      deletedData.current[current].push(term);
+    const scopedKey = getScopedKey(language, current);
+    deletedData.current[scopedKey] = deletedData.current[scopedKey] || [];
+    if (!deletedData.current[scopedKey].includes(term)) {
+      deletedData.current[scopedKey].push(term);
     }
     localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
-    fetchGraph(current);
+    invalidateCache(scopedKey);
+    fetchGraph(current, language);
+  };
+
+  const handleFacebookLogin = () => {
+    if (typeof window === 'undefined') return;
+    if (!facebookReady || !window.FB) {
+      setAuthNotice('Facebook SDK 尚未就緒，請稍候再試。');
+      return;
+    }
+    setAuthNotice('正在向 Facebook 取得授權…');
+    window.FB.login(
+      (response) => {
+        if (response.status !== 'connected') {
+          setAuthNotice('Facebook 登入失敗或已取消。');
+          return;
+        }
+        window.FB.api('/me', { fields: 'name,email,picture' }, (profile) => {
+          if (!profile || profile.error) {
+            setAuthNotice('無法讀取 Facebook 會員資料。');
+            return;
+          }
+          applyMemberProfile({
+            provider: 'facebook',
+            name: profile.name,
+            email: profile.email,
+            avatar: profile.picture?.data?.url,
+            id: profile.id
+          });
+          setAuthNotice('已透過 Facebook 登入');
+        });
+      },
+      { scope: 'public_profile,email' }
+    );
+  };
+
+  const handleLogout = () => {
+    clearMemberProfile();
+    if (typeof window !== 'undefined' && window.google?.accounts?.id) {
+      window.google.accounts.id.disableAutoSelect();
+    }
+    if (typeof window !== 'undefined' && window.FB?.logout) {
+      window.FB.logout();
+    }
+    setAuthNotice('已登出。');
   };
 
   const handleBack = () => {
@@ -123,21 +601,162 @@ export default function App() {
     const prev = [...history];
     const last = prev.pop();
     setHistory(prev);
-    setKeyword(last);
-    fetchGraph(last);
+    if (!last) return;
+    setKeyword(last.keyword);
+    if (last.language && last.language !== language) {
+      setLanguage(last.language);
+      localStorage.setItem('conceptNetLanguage', last.language);
+    } else {
+      fetchGraph(last.keyword, last.language || language);
+    }
   };
+
+  const exportCustomData = () => {
+    const payload = {
+      userGraphData: userData.current,
+      deletedGraphData: deletedData.current,
+      exportedAt: new Date().toISOString()
+    };
+    downloadJson(payload, 'custom-relations.json');
+  };
+
+  const applyCustomPayload = (payload, successMessage = '匯入成功！重新整理圖譜中。') => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('JSON 內容必須是物件');
+    }
+
+    if (payload.userGraphData) {
+      userData.current = payload.userGraphData;
+      localStorage.setItem('userGraphData', JSON.stringify(userData.current));
+    }
+    if (payload.deletedGraphData) {
+      deletedData.current = payload.deletedGraphData;
+      localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
+    }
+
+    graphCacheRef.current = {};
+
+    setImportNotice({ type: 'success', message: successMessage });
+    fetchGraph(keyword, language);
+  };
+
+  const importCustomData = () => {
+    setImportNotice(null);
+    if (!importText.trim()) {
+      setImportNotice({ type: 'error', message: '請貼上匯出內容或自行撰寫 JSON。' });
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(importText);
+      applyCustomPayload(payload);
+    } catch (error) {
+      console.error('匯入自訂資料失敗', error);
+      setImportNotice({ type: 'error', message: `匯入失敗：${error.message}` });
+    }
+  };
+
+  const handleImportDragOver = (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setIsDragOverImport(true);
+  };
+
+  const handleImportDragLeave = (event) => {
+    event.preventDefault();
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setIsDragOverImport(false);
+  };
+
+  const handleImportDrop = async (event) => {
+    event.preventDefault();
+    setIsDragOverImport(false);
+    setImportNotice(null);
+    const file = event.dataTransfer?.files?.[0];
+    if (!file) {
+      setImportNotice({ type: 'error', message: '找不到檔案，請拖曳 JSON 檔案後再試一次。' });
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setImportText(text);
+      const payload = JSON.parse(text);
+      applyCustomPayload(payload, `已套用檔案「${file.name}」。`);
+    } catch (error) {
+      console.error('拖曳匯入失敗', error);
+      setImportNotice({ type: 'error', message: `拖曳匯入失敗：${error.message}` });
+    }
+  };
+
+  const renderStatusAttempts = () => {
+    if (statusReport.ok) {
+      return (
+        <p style={{ margin: '0.5rem 0' }}>
+          最近一次已成功連線 ConceptNet（{language.toUpperCase()}），可以直接探索官方資料。
+        </p>
+      );
+    }
+
+    if (!statusReport.attempts.length) {
+      return <p style={{ margin: '0.5rem 0' }}>尚未偵測到連線結果，請嘗試輸入關鍵字後再查看。</p>;
+    }
+
+    return (
+      <ul style={{ paddingLeft: '1.25rem', margin: '0.5rem 0' }}>
+        {statusReport.attempts.map((attempt, index) => (
+          <li key={`${attempt}-${index}`}>{attempt}</li>
+        ))}
+      </ul>
+    );
+  };
+
+  const authTriggerLabel = memberProfile
+    ? `👤 ${memberProfile.name || '會員'} · 管理帳號`
+    : '登入 / 註冊 · 記住會員資訊';
 
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
+      <button
+        onClick={() => setShowAuthModal(true)}
+        style={{
+          position: 'absolute',
+          top: 12,
+          right: 16,
+          zIndex: 2,
+          fontSize: 12,
+          color: '#2c3e50',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          textDecoration: 'underline'
+        }}
+      >
+        {authTriggerLabel}
+      </button>
       <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
         <input
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
-          placeholder="輸入關鍵字"
+          placeholder={language === 'en' ? 'Enter a keyword' : '輸入關鍵字'}
           style={{ fontSize: '1rem', padding: '0.5rem', border: '1px solid #ccc', borderRadius: '4px', outline: 'none' }}
         />
+        <select
+          value={language}
+          onChange={(e) => {
+            const nextLang = e.target.value;
+            setLanguage(nextLang);
+            localStorage.setItem('conceptNetLanguage', nextLang);
+          }}
+          style={{ padding: '0.5rem', borderRadius: 4, border: '1px solid #ccc' }}
+        >
+          {supportedLanguages.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
         <button
-          onClick={() => fetchGraph(keyword)}
+          onClick={() => fetchGraph(keyword, language)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >探索</button>
         <button
@@ -146,13 +765,24 @@ export default function App() {
           style={{ padding: '0.5rem 1rem', backgroundColor: history.length === 0 ? '#ccc' : '#2196F3', color: 'white', border: 'none', borderRadius: '4px', cursor: history.length === 0 ? 'not-allowed' : 'pointer' }}
         >← 返回</button>
         <button
-          onClick={() => setAddMode(true)}
+          onClick={() => {
+            setInputPos(defaultInputPos);
+            setAddMode(true);
+          }}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#f39c12', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >➕ 新增關聯</button>
         <button
           onClick={() => setShowPanel(!showPanel)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#888', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >{showPanel ? '▶️ 收起編輯區' : '📌 編輯區'}</button>
+        <button
+          onClick={() => setShowStatusPanel(!showStatusPanel)}
+          style={{ padding: '0.5rem 1rem', backgroundColor: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+        >{showStatusPanel ? '🛰️ 關閉連線說明' : '🛰️ 連線說明'}</button>
+        {loading && <span style={{ alignSelf: 'center', color: '#444' }}>載入中...</span>}
+        {errorMessage && (
+          <span style={{ width: '100%', color: '#c0392b', fontWeight: 600 }}>{errorMessage}</span>
+        )}
       </div>
 
       <ForceGraph2D
@@ -160,7 +790,12 @@ export default function App() {
         graphData={graphData}
         nodeLabel="id"
         onNodeClick={handleClickNode}
-        linkDistance={(link) => 300 / Math.pow(link.weight || 1, 1.5)}
+        linkDistance={(link) => {
+          const baseDistance = 300 / Math.pow(link.weight || 1, 1.5);
+          const neighborId = resolveNeighborId(link, keyword);
+          const clickBoost = 1 + getNodeClickCount(neighborId, language) * 0.4;
+          return Math.max(60, baseDistance / clickBoost);
+        }}
         cooldownTicks={80}
         enableNodeDrag
         enableZoomInteraction
@@ -191,19 +826,19 @@ export default function App() {
         }}
       />
 
-      {addMode && (
+      {addMode && inputPos && (
         <input
           style={{ position: 'absolute', left: inputPos.x, top: inputPos.y, fontSize: '16px', padding: '4px', zIndex: 10, border: '1px solid #ccc', borderRadius: '4px' }}
           autoFocus
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') addCustomRelation(); }}
-          placeholder="輸入新詞按 Enter"
+          placeholder={language === 'en' ? 'Enter a new term and press Enter' : '輸入新詞按 Enter'}
         />
       )}
 
       {showPanel && (
-        <div style={{ position: 'absolute', top: 60, right: 0, width: '33vw', maxWidth: 300, background: '#fff', padding: 8, borderRadius: '8px 0 0 8px', maxHeight: '70vh', overflowY: 'auto', overflowX: 'auto' }}>
+        <div style={{ position: 'absolute', top: 60, right: 0, width: '33vw', maxWidth: 360, background: '#fff', padding: 12, borderRadius: '12px 0 0 12px', maxHeight: '80vh', overflowY: 'auto', overflowX: 'auto', boxShadow: '-4px 6px 16px rgba(0,0,0,0.1)' }}>
           <strong>關鍵詞：</strong>{keyword}
           <div style={{ marginTop: 8 }}>
             {allLinks.map((term) => (
@@ -212,6 +847,184 @@ export default function App() {
                 <button onClick={() => deleteAnyRelation(term)} style={{ marginLeft: 8 }}>🗑️</button>
               </div>
             ))}
+          </div>
+
+          <hr style={{ margin: '12px 0' }} />
+          <div>
+            <strong>自訂資料庫工具</strong>
+            <p style={{ fontSize: 12, color: '#555' }}>
+              所有自訂關聯都儲存在瀏覽器的 localStorage（鍵值格式為「語言:關鍵詞」，例如 zh:狗）。若你想建立自己的資料庫，可以匯出後備份或手動編輯 JSON 再匯入。
+            </p>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: 8 }}>
+              <button onClick={exportCustomData} style={{ padding: '0.3rem 0.75rem', borderRadius: 4, border: '1px solid #27ae60', background: '#27ae60', color: '#fff' }}>⬇️ 匯出 JSON</button>
+              <button onClick={() => { setImportText(''); setImportNotice(null); }} style={{ padding: '0.3rem 0.75rem', borderRadius: 4, border: '1px solid #ccc', background: '#ecf0f1' }}>🧹 清空匯入區</button>
+            </div>
+            <div
+              onDragOver={handleImportDragOver}
+              onDragLeave={handleImportDragLeave}
+              onDrop={handleImportDrop}
+              style={{
+                border: `2px dashed ${isDragOverImport ? '#2980b9' : '#bbb'}`,
+                borderRadius: 8,
+                padding: 8,
+                background: isDragOverImport ? '#f0f8ff' : '#fafafa'
+              }}
+            >
+              <textarea
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                placeholder="貼上包含 userGraphData / deletedGraphData 的 JSON，或直接拖曳匯出檔到此處"
+                style={{ width: '100%', minHeight: 100, borderRadius: 6, border: '1px solid #ddd', padding: 8, fontFamily: 'monospace', fontSize: 12, background: '#fff' }}
+              />
+              <p style={{ margin: '6px 0 0', fontSize: 12, color: '#555' }}>也可以拖曳匯出 JSON 檔到此區，自動填入並套用。</p>
+            </div>
+            <button onClick={importCustomData} style={{ marginTop: 8, padding: '0.4rem 0.8rem', borderRadius: 4, border: '1px solid #2980b9', background: '#2980b9', color: '#fff' }}>⬆️ 匯入 / 套用</button>
+            {importNotice && (
+              <div style={{ marginTop: 6, fontSize: 12, color: importNotice.type === 'error' ? '#c0392b' : '#27ae60' }}>
+                {importNotice.message}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showStatusPanel && (
+        <div style={{ position: 'absolute', bottom: 16, left: 16, width: 'min(420px, 90vw)', background: '#fff', padding: 16, borderRadius: 12, boxShadow: '0 6px 20px rgba(0,0,0,0.15)' }}>
+          <strong style={{ fontSize: 16 }}>ConceptNet 連線說明</strong>
+          <p style={{ margin: '0.25rem 0', fontSize: 12, color: '#666' }}>
+            {statusReport.lastChecked ? `最後檢查：${new Date(statusReport.lastChecked).toLocaleString()}` : '尚未進行檢查'}
+          </p>
+          <p style={{ margin: '0.5rem 0' }}>{statusReport.message || '尚未偵測到錯誤。'}</p>
+          {renderStatusAttempts()}
+          <p style={{ margin: '0.5rem 0', fontSize: 12, color: '#333' }}>
+            目前語言：<strong>{language.toUpperCase()}</strong> · 查詢網址：
+            <a href={conceptNetUrl(keyword || '', language)} target="_blank" rel="noreferrer" style={{ marginLeft: 4 }}>
+              /query?node=/c/{language}/{keyword || '…'}
+            </a>
+          </p>
+          <p style={{ marginTop: 12, fontSize: 13 }}>
+            ConceptNet 是免費的研究專案，偶爾會維護或被地區性網路封鎖。你可以等候官方 API 恢復，或透過上方的「自訂資料庫工具」建立 / 匯入自己的關聯資料庫，同時繼續新增節點。
+          </p>
+          <p style={{ marginTop: 8, fontSize: 13 }}>
+            如果需要另一個資料來源，可以改用匯入的 JSON 檔，或在 proxy 清單中加入你自己的可用伺服器。
+          </p>
+        </div>
+      )}
+
+      {showAuthModal && (
+        <div
+          onClick={() => setShowAuthModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.35)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 5,
+            padding: 16
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(420px, 95vw)',
+              background: '#fff',
+              borderRadius: 16,
+              padding: 20,
+              boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <strong style={{ fontSize: 16 }}>登入 / 註冊會員</strong>
+              <button
+                onClick={() => setShowAuthModal(false)}
+                style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer', color: '#333' }}
+              >
+                ✕
+              </button>
+            </div>
+            {memberProfile ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {memberProfile.avatar && (
+                    <img src={memberProfile.avatar} alt="會員頭像" style={{ width: 60, height: 60, borderRadius: '50%' }} />
+                  )}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 18 }}>{memberProfile.name || '已登入會員'}</div>
+                    {memberProfile.email && <div style={{ fontSize: 13, color: '#555' }}>{memberProfile.email}</div>}
+                    <div style={{ fontSize: 12, color: '#777' }}>
+                      透過 {providerLabels[memberProfile.provider] || memberProfile.provider} 註冊 / 登入
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  style={{ padding: '0.5rem 1rem', borderRadius: 8, border: '1px solid #ccc', background: '#f7f7f7', cursor: 'pointer' }}
+                >
+                  登出並更換帳戶
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <p style={{ fontSize: 13, color: '#333', marginBottom: 0 }}>
+                  透過 Google 或 Facebook 登入 / 註冊，就能記住你的自訂關聯和匯入紀錄，下次使用直接載入會員資料。
+                </p>
+                {googleClientId ? (
+                  <div ref={googleButtonRef} style={{ display: 'inline-flex' }} />
+                ) : (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      padding: '0.5rem',
+                      borderRadius: 8,
+                      border: '1px solid #ddd',
+                      background: '#fdfdfd',
+                      color: '#555',
+                      lineHeight: 1.6
+                    }}
+                  >
+                    目前尚未設定 <code>VITE_GOOGLE_CLIENT_ID</code>，因此無法使用 Google 登入 / 註冊。
+                    <br />
+                    這代表需要在部署環境中填入你向 Google Cloud 申請的 OAuth 2.0 Client ID。若不確定，請洽詢網站管理者或按照
+                    <a
+                      href="https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ marginLeft: 4 }}
+                    >
+                      官方教學
+                    </a>
+                    建立新的 Client 並將值寫進 <code>.env</code> 檔。
+                  </div>
+                )}
+                <button
+                  onClick={handleFacebookLogin}
+                  disabled={!facebookAppId}
+                  style={{
+                    padding: '0.5rem 1rem',
+                    borderRadius: 8,
+                    border: '1px solid #1877f2',
+                    background: facebookAppId ? '#1877f2' : '#ccc',
+                    color: '#fff',
+                    fontSize: 14,
+                    cursor: facebookAppId ? 'pointer' : 'not-allowed'
+                  }}
+                >
+                  使用 Facebook 登入 / 註冊
+                </button>
+                {!facebookAppId && (
+                  <div style={{ fontSize: 12, color: '#555', lineHeight: 1.6 }}>
+                    尚未設定 <code>VITE_FACEBOOK_APP_ID</code>，所以無法呼叫 Facebook 登入 SDK。請至 Meta for Developers 建立應用程式並
+                    取得 App ID，然後寫入部署環境的 <code>.env</code>（或請管理者協助），即可啟用此按鈕。
+                  </div>
+                )}
+              </div>
+            )}
+            {authNotice && <div style={{ fontSize: 12, color: '#555' }}>{authNotice}</div>}
           </div>
         </div>
       )}
