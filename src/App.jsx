@@ -938,8 +938,29 @@ export default function App() {
                 {googleClientId ? (
                   <div ref={googleButtonRef} style={{ display: 'inline-flex' }} />
                 ) : (
-                  <div style={{ fontSize: 12, padding: '0.5rem', borderRadius: 8, border: '1px solid #ddd', background: '#fdfdfd', color: '#666' }}>
-                    設定 <code>VITE_GOOGLE_CLIENT_ID</code> 後即可啟用 Google 登入 / 註冊按鈕。
+                  <div
+                    style={{
+                      fontSize: 12,
+                      padding: '0.5rem',
+                      borderRadius: 8,
+                      border: '1px solid #ddd',
+                      background: '#fdfdfd',
+                      color: '#555',
+                      lineHeight: 1.6
+                    }}
+                  >
+                    目前尚未設定 <code>VITE_GOOGLE_CLIENT_ID</code>，因此無法使用 Google 登入 / 註冊。
+                    <br />
+                    這代表需要在部署環境中填入你向 Google Cloud 申請的 OAuth 2.0 Client ID。若不確定，請洽詢網站管理者或按照
+                    <a
+                      href="https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ marginLeft: 4 }}
+                    >
+                      官方教學
+                    </a>
+                    建立新的 Client 並將值寫進 <code>.env</code> 檔。
                   </div>
                 )}
                 <button
@@ -958,7 +979,10 @@ export default function App() {
                   使用 Facebook 登入 / 註冊
                 </button>
                 {!facebookAppId && (
-                  <div style={{ fontSize: 12, color: '#777' }}>設定 <code>VITE_FACEBOOK_APP_ID</code> 後即可啟用 Facebook。</div>
+                  <div style={{ fontSize: 12, color: '#555', lineHeight: 1.6 }}>
+                    尚未設定 <code>VITE_FACEBOOK_APP_ID</code>，所以無法呼叫 Facebook 登入 SDK。請至 Meta for Developers 建立應用程式並
+                    取得 App ID，然後寫入部署環境的 <code>.env</code>（或請管理者協助），即可啟用此按鈕。
+                  </div>
                 )}
               </div>
             )}
