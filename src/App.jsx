@@ -68,6 +68,15 @@ export default function App() {
   const [showStatusPanel, setShowStatusPanel] = useState(false);
   const [importText, setImportText] = useState('');
   const [importNotice, setImportNotice] = useState(null);
+  const [clickCounts, setClickCounts] = useState(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      return JSON.parse(localStorage.getItem('nodeClickCounts')) || {};
+    } catch (error) {
+      console.warn('Failed to parse node click counts', error);
+      return {};
+    }
+  });
   const fgRef = useRef();
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
@@ -84,6 +93,20 @@ export default function App() {
   };
 
   const getScopedKey = (currentLang, centerWord) => `${currentLang}:${centerWord}`;
+
+  const getEndpointId = (endpoint) => {
+    if (!endpoint) return '';
+    return typeof endpoint === 'string' ? endpoint : endpoint.id || '';
+  };
+
+  const resolveNeighborId = (link, focusId) => {
+    if (!link) return '';
+    const targetId = getEndpointId(link.target);
+    if (targetId && targetId !== focusId) return targetId;
+    const sourceId = getEndpointId(link.source);
+    if (sourceId && sourceId !== focusId) return sourceId;
+    return targetId || sourceId || '';
+  };
 
   const fetchGraph = async (centerWord, currentLang = language) => {
     setLoading(true);
@@ -187,8 +210,31 @@ export default function App() {
     fetchGraph(keyword, language);
   }, [language]);
 
+  useEffect(() => {
+    if (fgRef.current) {
+      fgRef.current.d3ReheatSimulation();
+    }
+  }, [clickCounts]);
+
+  const recordNodeClick = (nodeId, currentLang = language) => {
+    if (!nodeId) return;
+    setClickCounts((prev) => {
+      const scopedKey = getScopedKey(currentLang, nodeId);
+      const next = { ...prev, [scopedKey]: (prev[scopedKey] || 0) + 1 };
+      localStorage.setItem('nodeClickCounts', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const getNodeClickCount = (term, currentLang = language) => {
+    if (!term) return 0;
+    const scopedKey = getScopedKey(currentLang, term);
+    return clickCounts[scopedKey] || 0;
+  };
+
   const handleClickNode = (node) => {
     if (addMode) return;
+    recordNodeClick(node.id, language);
     setHistory((prev) => [...prev, { keyword, language }]);
     fetchGraph(node.id, language);
     setKeyword(node.id);
@@ -354,7 +400,12 @@ export default function App() {
         graphData={graphData}
         nodeLabel="id"
         onNodeClick={handleClickNode}
-        linkDistance={(link) => 300 / Math.pow(link.weight || 1, 1.5)}
+        linkDistance={(link) => {
+          const baseDistance = 300 / Math.pow(link.weight || 1, 1.5);
+          const neighborId = resolveNeighborId(link, keyword);
+          const clickBoost = 1 + getNodeClickCount(neighborId, language) * 0.4;
+          return Math.max(60, baseDistance / clickBoost);
+        }}
         cooldownTicks={80}
         enableNodeDrag
         enableZoomInteraction
