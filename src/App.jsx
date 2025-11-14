@@ -272,6 +272,9 @@ export default function App() {
         lastChecked: new Date().toISOString(),
         message: `${currentLang}: ${error.message || '未知錯誤'}`
       });
+      const fallbackPayload = buildGraphPayload(centerWord, currentLang, [], customTerms, deletedTerms);
+      cacheGraphPayload(scopedKey, fallbackPayload);
+      applyGraphPayload(fallbackPayload);
       setLoading(false);
     }
   };
