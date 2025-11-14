@@ -134,6 +134,7 @@ export default function App() {
   const [authNotice, setAuthNotice] = useState('');
   const [googleReady, setGoogleReady] = useState(false);
   const [facebookReady, setFacebookReady] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const clickCountsRef = useRef(loadStoredClickCounts());
   const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
@@ -142,7 +143,6 @@ export default function App() {
   const activeRequestRef = useRef(0);
   const googleButtonRef = useRef(null);
   const googleInitializedRef = useRef(false);
-  const googleButtonRenderedRef = useRef(false);
   const fbInitRef = useRef(false);
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
@@ -422,15 +422,16 @@ export default function App() {
   }, [googleClientId, googleReady]);
 
   useEffect(() => {
-    if (!googleReady || !googleButtonRef.current || googleButtonRenderedRef.current) return;
+    if (!googleReady || !showAuthModal) return;
+    if (!googleButtonRef.current) return;
     if (!window.google?.accounts?.id) return;
+    googleButtonRef.current.innerHTML = '';
     window.google.accounts.id.renderButton(googleButtonRef.current, {
       theme: 'outline',
       size: 'medium',
       text: 'signin_with'
     });
-    googleButtonRenderedRef.current = true;
-  }, [googleReady]);
+  }, [googleReady, showAuthModal]);
 
   useEffect(() => {
     if (!facebookAppId || fbInitRef.current || typeof window === 'undefined') return;
@@ -449,6 +450,12 @@ export default function App() {
       setAuthNotice('Facebook SDK 載入失敗，請確認 app id 是否正確。');
     });
   }, [facebookAppId]);
+
+  useEffect(() => {
+    if (!showAuthModal) {
+      setAuthNotice('');
+    }
+  }, [showAuthModal]);
 
   const recordNodeClick = (nodeId, currentLang = language) => {
     if (!nodeId) return;
@@ -667,8 +674,29 @@ export default function App() {
     );
   };
 
+  const authTriggerLabel = memberProfile
+    ? `👤 ${memberProfile.name || '會員'} · 管理帳號`
+    : '登入 / 註冊 · 記住會員資訊';
+
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
+      <button
+        onClick={() => setShowAuthModal(true)}
+        style={{
+          position: 'absolute',
+          top: 12,
+          right: 16,
+          zIndex: 2,
+          fontSize: 12,
+          color: '#2c3e50',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          textDecoration: 'underline'
+        }}
+      >
+        {authTriggerLabel}
+      </button>
       <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
         <input
           value={keyword}
@@ -713,47 +741,6 @@ export default function App() {
           onClick={() => setShowStatusPanel(!showStatusPanel)}
           style={{ padding: '0.5rem 1rem', backgroundColor: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
         >{showStatusPanel ? '🛰️ 關閉連線說明' : '🛰️ 連線說明'}</button>
-        <div style={{ minWidth: 260, padding: '0.5rem', border: '1px solid #ddd', borderRadius: 8, background: '#fff', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {memberProfile ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {memberProfile.avatar && (
-                <img src={memberProfile.avatar} alt="會員頭像" style={{ width: 40, height: 40, borderRadius: '50%' }} />
-              )}
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600 }}>{memberProfile.name || '已登入會員'}</div>
-                {memberProfile.email && <div style={{ fontSize: 12 }}>{memberProfile.email}</div>}
-                <div style={{ fontSize: 12, color: '#555' }}>
-                  透過 {providerLabels[memberProfile.provider] || memberProfile.provider} 登入
-                </div>
-              </div>
-              <button onClick={handleLogout} style={{ padding: '0.25rem 0.5rem', borderRadius: 4, border: '1px solid #ccc', background: '#f8f8f8' }}>登出</button>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <strong style={{ fontSize: 13 }}>登入以記住會員資訊</strong>
-              {googleClientId ? (
-                <div ref={googleButtonRef} style={{ display: 'inline-flex' }} />
-              ) : (
-                <button disabled style={{ padding: '0.4rem', borderRadius: 6, border: '1px solid #ddd', background: '#fefefe', color: '#888' }}>
-                  設定 VITE_GOOGLE_CLIENT_ID 後即可啟用 Google 登入
-                </button>
-              )}
-              <button
-                onClick={handleFacebookLogin}
-                disabled={!facebookAppId}
-                style={{
-                  padding: '0.4rem',
-                  borderRadius: 6,
-                  border: '1px solid #1877f2',
-                  background: facebookAppId ? '#1877f2' : '#ccc',
-                  color: '#fff',
-                  cursor: facebookAppId ? 'pointer' : 'not-allowed'
-                }}
-              >使用 Facebook 登入</button>
-            </div>
-          )}
-          {authNotice && <span style={{ fontSize: 12, color: '#555' }}>{authNotice}</span>}
-        </div>
         {loading && <span style={{ alignSelf: 'center', color: '#444' }}>載入中...</span>}
         {errorMessage && (
           <span style={{ width: '100%', color: '#c0392b', fontWeight: 600 }}>{errorMessage}</span>
@@ -883,6 +870,100 @@ export default function App() {
           <p style={{ marginTop: 8, fontSize: 13 }}>
             如果需要另一個資料來源，可以改用匯入的 JSON 檔，或在 proxy 清單中加入你自己的可用伺服器。
           </p>
+        </div>
+      )}
+
+      {showAuthModal && (
+        <div
+          onClick={() => setShowAuthModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.35)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 5,
+            padding: 16
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(420px, 95vw)',
+              background: '#fff',
+              borderRadius: 16,
+              padding: 20,
+              boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <strong style={{ fontSize: 16 }}>登入 / 註冊會員</strong>
+              <button
+                onClick={() => setShowAuthModal(false)}
+                style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer', color: '#333' }}
+              >
+                ✕
+              </button>
+            </div>
+            {memberProfile ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {memberProfile.avatar && (
+                    <img src={memberProfile.avatar} alt="會員頭像" style={{ width: 60, height: 60, borderRadius: '50%' }} />
+                  )}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 18 }}>{memberProfile.name || '已登入會員'}</div>
+                    {memberProfile.email && <div style={{ fontSize: 13, color: '#555' }}>{memberProfile.email}</div>}
+                    <div style={{ fontSize: 12, color: '#777' }}>
+                      透過 {providerLabels[memberProfile.provider] || memberProfile.provider} 註冊 / 登入
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  style={{ padding: '0.5rem 1rem', borderRadius: 8, border: '1px solid #ccc', background: '#f7f7f7', cursor: 'pointer' }}
+                >
+                  登出並更換帳戶
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <p style={{ fontSize: 13, color: '#333', marginBottom: 0 }}>
+                  透過 Google 或 Facebook 登入 / 註冊，就能記住你的自訂關聯和匯入紀錄，下次使用直接載入會員資料。
+                </p>
+                {googleClientId ? (
+                  <div ref={googleButtonRef} style={{ display: 'inline-flex' }} />
+                ) : (
+                  <div style={{ fontSize: 12, padding: '0.5rem', borderRadius: 8, border: '1px solid #ddd', background: '#fdfdfd', color: '#666' }}>
+                    設定 <code>VITE_GOOGLE_CLIENT_ID</code> 後即可啟用 Google 登入 / 註冊按鈕。
+                  </div>
+                )}
+                <button
+                  onClick={handleFacebookLogin}
+                  disabled={!facebookAppId}
+                  style={{
+                    padding: '0.5rem 1rem',
+                    borderRadius: 8,
+                    border: '1px solid #1877f2',
+                    background: facebookAppId ? '#1877f2' : '#ccc',
+                    color: '#fff',
+                    fontSize: 14,
+                    cursor: facebookAppId ? 'pointer' : 'not-allowed'
+                  }}
+                >
+                  使用 Facebook 登入 / 註冊
+                </button>
+                {!facebookAppId && (
+                  <div style={{ fontSize: 12, color: '#777' }}>設定 <code>VITE_FACEBOOK_APP_ID</code> 後即可啟用 Facebook。</div>
+                )}
+              </div>
+            )}
+            {authNotice && <div style={{ fontSize: 12, color: '#555' }}>{authNotice}</div>}
+          </div>
         </div>
       )}
 
