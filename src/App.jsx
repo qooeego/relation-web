@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
 const loadStoredMemberProfile = () => {
@@ -17,6 +17,17 @@ const loadStoredMembers = () => {
   } catch {
     return {};
   }
+};
+
+const loadCustomProxyTemplates = () => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const stored = JSON.parse(localStorage.getItem('conceptNetCustomProxies'));
+    if (Array.isArray(stored)) {
+      return stored.filter((entry) => entry && entry.template);
+    }
+  } catch {}
+  return [];
 };
 
 const persistMembers = (members) => {
@@ -63,9 +74,25 @@ const fallbackEndpoints = [
     parser: (response) => response.json()
   },
   {
+    label: 'corsproxy.io',
+    build: (keyword, language) => `https://corsproxy.io/?${conceptNetUrl(keyword, language)}`,
+    parser: (response) => response.json()
+  },
+  {
     label: 'corsproxy.org',
     build: (keyword, language) =>
       `https://corsproxy.org/?${encodeURIComponent(conceptNetUrl(keyword, language))}`,
+    parser: (response) => response.json()
+  },
+  {
+    label: 'yacdn.org',
+    build: (keyword, language) => `https://yacdn.org/proxy/${conceptNetUrl(keyword, language)}`,
+    parser: async (response) => extractJsonFromText(await response.text())
+  },
+  {
+    label: 'api.codetabs.com',
+    build: (keyword, language) =>
+      `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(conceptNetUrl(keyword, language))}`,
     parser: (response) => response.json()
   },
   {
@@ -100,16 +127,43 @@ const fallbackEndpoints = [
         throw new Error(`Mirror JSON 解析失敗: ${error.message}`);
       }
     }
+  },
+  {
+    label: 'r.jina.ai · cors.isomorphic',
+    build: (keyword, language) =>
+      `https://r.jina.ai/http://cors.isomorphic-git.org/${conceptNetUrl(keyword, language)}`,
+    parser: async (response) => {
+      try {
+        return extractJsonFromText(await response.text());
+      } catch (error) {
+        throw new Error(`Mirror JSON 解析失敗: ${error.message}`);
+      }
+    }
   }
 ];
 
-const fetchWithFallback = async (keyword, language) => {
+const buildCustomProxyUrl = (template, keyword, language) => {
+  if (!template) return conceptNetUrl(keyword, language);
+  const target = conceptNetUrl(keyword, language);
+  const hasRawToken = template.includes('{{url}}');
+  const hasEncodedToken = template.includes('{{encodedUrl}}');
+  if (!hasRawToken && !hasEncodedToken) {
+    return `${template}${target}`;
+  }
+  return template
+    .replaceAll('{{encodedUrl}}', encodeURIComponent(target))
+    .replaceAll('{{url}}', target);
+};
+
+const fetchWithFallback = async (keyword, language, extraEndpoints = []) => {
   const attempts = [];
   let lastError;
+  const endpoints = [...extraEndpoints, ...fallbackEndpoints];
 
-  for (const endpoint of fallbackEndpoints) {
-    const targetUrl = endpoint.build(keyword, language);
+  for (const endpoint of endpoints) {
+    let targetUrl = '';
     try {
+      targetUrl = endpoint.build(keyword, language);
       const init =
         typeof endpoint.init === 'function'
           ? endpoint.init(keyword, language)
@@ -119,7 +173,11 @@ const fetchWithFallback = async (keyword, language) => {
         throw new Error(`HTTP ${response.status}`);
       }
       const data = await endpoint.parser(response);
-      return data;
+      return {
+        data,
+        endpointLabel: endpoint.label || new URL(targetUrl).host,
+        endpointUrl: targetUrl
+      };
     } catch (error) {
       try {
         attempts.push(`${endpoint.label || new URL(targetUrl).host}: ${error.message}`);
@@ -146,6 +204,13 @@ const loadStoredClickCounts = () => {
   }
 };
 
+const persistCustomProxyTemplates = (templates) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('conceptNetCustomProxies', JSON.stringify(templates));
+  } catch {}
+};
+
 const downloadJson = (data, filename) => {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -170,7 +235,13 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [showPanel, setShowPanel] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const [statusReport, setStatusReport] = useState({ ok: true, attempts: [], lastChecked: null, message: '' });
+  const [statusReport, setStatusReport] = useState({
+    ok: true,
+    attempts: [],
+    lastChecked: null,
+    message: '',
+    endpointLabel: ''
+  });
   const [showStatusPanel, setShowStatusPanel] = useState(false);
   const [importText, setImportText] = useState('');
   const [importNotice, setImportNotice] = useState(null);
@@ -179,6 +250,9 @@ export default function App() {
   const [authNotice, setAuthNotice] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authForm, setAuthForm] = useState({ account: '', password: '', confirm: '' });
+  const [customProxyTemplates, setCustomProxyTemplates] = useState(loadCustomProxyTemplates);
+  const [proxyForm, setProxyForm] = useState({ label: '', template: '' });
+  const [proxyNotice, setProxyNotice] = useState('');
   const clickCountsRef = useRef(loadStoredClickCounts());
   const [clickCountsSnapshot, setClickCountsSnapshot] = useState(clickCountsRef.current);
   const fgRef = useRef();
@@ -186,9 +260,20 @@ export default function App() {
   const inFlightPrefetchRef = useRef(new Set());
   const activeRequestRef = useRef(0);
   const membersRef = useRef(loadStoredMembers());
+  const proxiesHydratedRef = useRef(false);
 
   const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
   const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
+  const customProxyEndpoints = useMemo(
+    () =>
+      customProxyTemplates.map((entry, index) => ({
+        label: entry.label || `自訂代理 ${index + 1}`,
+        build: (currentKeyword, currentLang) =>
+          buildCustomProxyUrl(entry.template, currentKeyword, currentLang),
+        parser: async (response) => extractJsonFromText(await response.text())
+      })),
+    [customProxyTemplates]
+  );
 
   const resolveTermLabel = (concept) => {
     if (!concept) return '';
@@ -393,7 +478,7 @@ export default function App() {
       setTimeout(async () => {
         try {
           const { customTerms, deletedTerms } = getCustomSets(term, currentLang);
-          const data = await fetchWithFallback(term, currentLang);
+          const { data } = await fetchWithFallback(term, currentLang, customProxyEndpoints);
           const normalized = normalizeEdges(data.edges, term, currentLang, deletedTerms);
           const payload = buildGraphPayload(term, currentLang, normalized, customTerms, deletedTerms);
           cacheGraphPayload(scopedKey, payload);
@@ -420,13 +505,14 @@ export default function App() {
     const requestId = ++activeRequestRef.current;
 
     try {
-      const data = await fetchWithFallback(centerWord, currentLang);
+      const { data, endpointLabel } = await fetchWithFallback(centerWord, currentLang, customProxyEndpoints);
       if (activeRequestRef.current !== requestId) return;
       setStatusReport({
         ok: true,
         attempts: [],
         lastChecked: new Date().toISOString(),
-        message: `成功連線 ConceptNet (${currentLang})`
+        message: `成功連線 ConceptNet (${currentLang})`,
+        endpointLabel: endpointLabel || ''
       });
       const relatedEdges = normalizeEdges(data.edges, centerWord, currentLang, deletedTerms);
       const payload = buildGraphPayload(centerWord, currentLang, relatedEdges, customTerms, deletedTerms);
@@ -443,7 +529,8 @@ export default function App() {
         ok: false,
         attempts: error.attempts || [],
         lastChecked: new Date().toISOString(),
-        message: `${currentLang}: ${error.message || '未知錯誤'}`
+        message: `${currentLang}: ${error.message || '未知錯誤'}`,
+        endpointLabel: ''
       });
       const fallbackPayload = buildGraphPayload(centerWord, currentLang, [], customTerms, deletedTerms);
       cacheGraphPayload(scopedKey, fallbackPayload);
@@ -463,11 +550,54 @@ export default function App() {
   }, [language]);
 
   useEffect(() => {
+    if (!proxiesHydratedRef.current) {
+      proxiesHydratedRef.current = true;
+      return;
+    }
+    fetchGraph(keyword, language);
+  }, [customProxyTemplates]);
+
+  useEffect(() => {
     if (!showAuthModal) {
       setAuthNotice('');
       resetAuthForm();
     }
   }, [showAuthModal]);
+
+  const handleAddCustomProxy = (event) => {
+    event?.preventDefault?.();
+    setProxyNotice('');
+    const trimmedTemplate = proxyForm.template.trim();
+    if (!trimmedTemplate) {
+      setProxyNotice('請輸入代理網址模板。');
+      return;
+    }
+    if (!trimmedTemplate.includes('{{url}}') && !trimmedTemplate.includes('{{encodedUrl}}')) {
+      setProxyNotice('模板需包含 {{url}} 或 {{encodedUrl}} 佔位符。');
+      return;
+    }
+
+    const trimmedLabel = proxyForm.label.trim() || `自訂代理 ${customProxyTemplates.length + 1}`;
+    const next = [
+      ...customProxyTemplates,
+      {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        label: trimmedLabel,
+        template: trimmedTemplate
+      }
+    ];
+    setCustomProxyTemplates(next);
+    persistCustomProxyTemplates(next);
+    setProxyForm({ label: '', template: '' });
+    setProxyNotice('已新增自訂代理，之後的查詢會優先使用。');
+  };
+
+  const handleRemoveCustomProxy = (proxyId) => {
+    const next = customProxyTemplates.filter((entry) => entry.id !== proxyId);
+    setCustomProxyTemplates(next);
+    persistCustomProxyTemplates(next);
+    setProxyNotice(next.length ? '已移除代理。' : '已清空所有自訂代理。');
+  };
 
   const recordNodeClick = (nodeId, currentLang = language) => {
     if (!nodeId) return;
@@ -631,7 +761,8 @@ export default function App() {
     if (statusReport.ok) {
       return (
         <p style={{ margin: '0.5rem 0' }}>
-          最近一次已成功連線 ConceptNet（{language.toUpperCase()}），可以直接探索官方資料。
+          最近一次已成功連線 ConceptNet（{language.toUpperCase()}）
+          {statusReport.endpointLabel ? ` · 代理：${statusReport.endpointLabel}` : ''}，可以直接探索官方資料。
         </p>
       );
     }
@@ -839,11 +970,63 @@ export default function App() {
               /query?node=/c/{language}/{keyword || '…'}
             </a>
           </p>
+          <div style={{ marginTop: 12 }}>
+            <strong style={{ fontSize: 14 }}>預設代理順序</strong>
+            <ol style={{ margin: '0.4rem 0', paddingLeft: '1.25rem', fontSize: 12, color: '#444' }}>
+              {fallbackEndpoints.map((endpoint, index) => (
+                <li key={`${endpoint.label || 'endpoint'}-${index}`}>{endpoint.label || '未命名代理'}</li>
+              ))}
+            </ol>
+            <p style={{ fontSize: 12, color: '#666' }}>列表由程式自動輪詢，成功的代理會立即更新上方狀態。</p>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <strong style={{ fontSize: 14 }}>自訂代理（會優先於預設清單）</strong>
+            <p style={{ fontSize: 12, color: '#444', margin: '0.35rem 0' }}>
+              模板可使用 <code>{'{{url}}'}</code>（原始 URL）或 <code>{'{{encodedUrl}}'}</code>（編碼後 URL）。例如：
+              <code>https://corsproxy.io/?{'{{url}}'}</code>
+            </p>
+            {customProxyTemplates.length ? (
+              <ul style={{ listStyle: 'none', padding: 0, margin: '0.25rem 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {customProxyTemplates.map((entry) => (
+                  <li key={entry.id} style={{ border: '1px solid #eee', borderRadius: 6, padding: 8, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{entry.label}</div>
+                      <div style={{ fontSize: 11, color: '#555', wordBreak: 'break-all' }}>{entry.template}</div>
+                    </div>
+                    <button type="button" onClick={() => handleRemoveCustomProxy(entry.id)} style={{ border: 'none', background: '#e74c3c', color: '#fff', borderRadius: 4, padding: '0 8px', cursor: 'pointer' }}>
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p style={{ fontSize: 12, color: '#777' }}>尚未加入自訂代理，將使用預設清單。</p>
+            )}
+            <form onSubmit={handleAddCustomProxy} style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+              <input
+                value={proxyForm.label}
+                onChange={(e) => setProxyForm((prev) => ({ ...prev, label: e.target.value }))}
+                placeholder="代理名稱（可留空）"
+                style={{ padding: '0.4rem 0.6rem', borderRadius: 6, border: '1px solid #ddd' }}
+              />
+              <textarea
+                value={proxyForm.template}
+                onChange={(e) => setProxyForm((prev) => ({ ...prev, template: e.target.value }))}
+                placeholder="輸入代理網址模板，例如：https://corsproxy.io/?{{url}}"
+                rows={2}
+                style={{ padding: '0.4rem 0.6rem', borderRadius: 6, border: '1px solid #ddd', fontSize: 12 }}
+              />
+              <button type="submit" style={{ padding: '0.4rem 0.8rem', borderRadius: 6, border: 'none', background: '#2ecc71', color: '#fff', cursor: 'pointer' }}>
+                ➕ 儲存自訂代理
+              </button>
+            </form>
+            {proxyNotice && <p style={{ fontSize: 12, color: '#2c3e50', marginTop: 6 }}>{proxyNotice}</p>}
+          </div>
           <p style={{ marginTop: 12, fontSize: 13 }}>
             ConceptNet 是免費的研究專案，偶爾會維護或被地區性網路封鎖。你可以等候官方 API 恢復，或透過上方的「自訂資料庫工具」建立 / 匯入自己的關聯資料庫，同時繼續新增節點。
           </p>
           <p style={{ marginTop: 8, fontSize: 13 }}>
-            如果需要另一個資料來源，可以改用匯入的 JSON 檔，或在 proxy 清單中加入你自己的可用伺服器。
+            若有自己的 proxy 或內部備援，可在此面板加入模板，前端會優先嘗試你的設定並在失敗時才退回預設清單。
           </p>
         </div>
       )}
