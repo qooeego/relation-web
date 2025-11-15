@@ -45,8 +45,20 @@ const supportedLanguages = [
 const providerLabels = {
   local: '站內帳號'
 };
-const conceptNetUrl = (keyword, language) =>
-  `https://api.conceptnet.io/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
+
+const buildConceptNetTerm = (keyword, language) =>
+  `/query?node=/c/${language}/${encodeURIComponent(keyword)}`;
+
+const conceptNetUrl = (keyword, language) => `https://api.conceptnet.io${buildConceptNetTerm(keyword, language)}`;
+
+const proxyBaseRaw = import.meta.env.VITE_CONCEPTNET_PROXY_BASE || '/api/conceptnet';
+const proxyBase = proxyBaseRaw.endsWith('/') ? proxyBaseRaw.slice(0, -1) : proxyBaseRaw;
+
+const dedicatedProxyEndpoint = {
+  label: `自建 proxy (${proxyBase})`,
+  build: (keyword, language) => `${proxyBase}?term=${encodeURIComponent(buildConceptNetTerm(keyword, language))}`,
+  parser: (response) => response.json()
+};
 
 const extractJsonFromText = (text) => {
   try {
@@ -145,14 +157,31 @@ const fallbackEndpoints = [
 const buildCustomProxyUrl = (template, keyword, language) => {
   if (!template) return conceptNetUrl(keyword, language);
   const target = conceptNetUrl(keyword, language);
-  const hasRawToken = template.includes('{{url}}');
-  const hasEncodedToken = template.includes('{{encodedUrl}}');
-  if (!hasRawToken && !hasEncodedToken) {
+  const term = buildConceptNetTerm(keyword, language);
+  const hasToken =
+    template.includes('{{url}}') ||
+    template.includes('{{encodedUrl}}') ||
+    template.includes('{{term}}') ||
+    template.includes('{{encodedTerm}}');
+  const replaced = template
+    .replaceAll('{{encodedUrl}}', encodeURIComponent(target))
+    .replaceAll('{{url}}', target)
+    .replaceAll('{{encodedTerm}}', encodeURIComponent(term))
+    .replaceAll('{{term}}', term);
+  if (!hasToken) {
     return `${template}${target}`;
   }
-  return template
-    .replaceAll('{{encodedUrl}}', encodeURIComponent(target))
-    .replaceAll('{{url}}', target);
+  return replaced;
+};
+
+const describeEndpointLabel = (endpoint, targetUrl) => {
+  if (endpoint?.label) return endpoint.label;
+  try {
+    const base = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
+    return new URL(targetUrl, base).host || targetUrl;
+  } catch {
+    return targetUrl;
+  }
 };
 
 const fetchWithFallback = async (keyword, language, extraEndpoints = []) => {
@@ -175,12 +204,12 @@ const fetchWithFallback = async (keyword, language, extraEndpoints = []) => {
       const data = await endpoint.parser(response);
       return {
         data,
-        endpointLabel: endpoint.label || new URL(targetUrl).host,
+        endpointLabel: describeEndpointLabel(endpoint, targetUrl),
         endpointUrl: targetUrl
       };
     } catch (error) {
       try {
-        attempts.push(`${endpoint.label || new URL(targetUrl).host}: ${error.message}`);
+        attempts.push(`${describeEndpointLabel(endpoint, targetUrl)}: ${error.message}`);
       } catch {
         attempts.push(`${endpoint.label || targetUrl}: ${error.message}`);
       }
@@ -240,7 +269,8 @@ export default function App() {
     attempts: [],
     lastChecked: null,
     message: '',
-    endpointLabel: ''
+    endpointLabel: '',
+    endpointUrl: ''
   });
   const [showStatusPanel, setShowStatusPanel] = useState(false);
   const [importText, setImportText] = useState('');
@@ -275,6 +305,13 @@ export default function App() {
       })),
     [customProxyTemplates]
   );
+
+  const prioritizedProxyEndpoints = useMemo(
+    () => [dedicatedProxyEndpoint, ...customProxyEndpoints],
+    [customProxyEndpoints]
+  );
+
+  const defaultProxyOrder = useMemo(() => [dedicatedProxyEndpoint, ...fallbackEndpoints], []);
 
   const resolveTermLabel = (concept) => {
     if (!concept) return '';
@@ -496,7 +533,7 @@ export default function App() {
       setTimeout(async () => {
         try {
           const { customTerms, deletedTerms } = getCustomSets(term, currentLang);
-          const { data } = await fetchWithFallback(term, currentLang, customProxyEndpoints);
+          const { data } = await fetchWithFallback(term, currentLang, prioritizedProxyEndpoints);
           const normalized = normalizeEdges(data.edges, term, currentLang, deletedTerms);
           const payload = buildGraphPayload(term, currentLang, normalized, customTerms, deletedTerms);
           cacheGraphPayload(scopedKey, payload);
@@ -523,14 +560,19 @@ export default function App() {
     const requestId = ++activeRequestRef.current;
 
     try {
-      const { data, endpointLabel } = await fetchWithFallback(centerWord, currentLang, customProxyEndpoints);
+      const { data, endpointLabel, endpointUrl } = await fetchWithFallback(
+        centerWord,
+        currentLang,
+        prioritizedProxyEndpoints
+      );
       if (activeRequestRef.current !== requestId) return;
       setStatusReport({
         ok: true,
         attempts: [],
         lastChecked: new Date().toISOString(),
         message: `成功連線 ConceptNet (${currentLang})`,
-        endpointLabel: endpointLabel || ''
+        endpointLabel: endpointLabel || '',
+        endpointUrl: endpointUrl || ''
       });
       const relatedEdges = normalizeEdges(data.edges, centerWord, currentLang, deletedTerms);
       const payload = buildGraphPayload(centerWord, currentLang, relatedEdges, customTerms, deletedTerms);
@@ -548,7 +590,8 @@ export default function App() {
         attempts: error.attempts || [],
         lastChecked: new Date().toISOString(),
         message: `${currentLang}: ${error.message || '未知錯誤'}`,
-        endpointLabel: ''
+        endpointLabel: '',
+        endpointUrl: ''
       });
       const fallbackPayload = buildGraphPayload(centerWord, currentLang, [], customTerms, deletedTerms);
       cacheGraphPayload(scopedKey, fallbackPayload);
@@ -590,8 +633,13 @@ export default function App() {
       setProxyNotice('請輸入代理網址模板。');
       return;
     }
-    if (!trimmedTemplate.includes('{{url}}') && !trimmedTemplate.includes('{{encodedUrl}}')) {
-      setProxyNotice('模板需包含 {{url}} 或 {{encodedUrl}} 佔位符。');
+    const supportsToken =
+      trimmedTemplate.includes('{{url}}') ||
+      trimmedTemplate.includes('{{encodedUrl}}') ||
+      trimmedTemplate.includes('{{term}}') ||
+      trimmedTemplate.includes('{{encodedTerm}}');
+    if (!supportsToken) {
+      setProxyNotice('模板需包含 {{url}}、{{encodedUrl}}、{{term}} 或 {{encodedTerm}} 佔位符。');
       return;
     }
 
@@ -982,6 +1030,11 @@ export default function App() {
           </p>
           <p style={{ margin: '0.5rem 0' }}>{statusReport.message || '尚未偵測到錯誤。'}</p>
           {renderStatusAttempts()}
+          {statusReport.ok && statusReport.endpointUrl && (
+            <p style={{ margin: '0.5rem 0', fontSize: 12, color: '#2c3e50', wordBreak: 'break-all' }}>
+              最後一次成功請求：<code>{statusReport.endpointUrl}</code>
+            </p>
+          )}
           <p style={{ margin: '0.5rem 0', fontSize: 12, color: '#333' }}>
             目前語言：<strong>{language.toUpperCase()}</strong> · 查詢網址：
             <a href={conceptNetUrl(keyword || '', language)} target="_blank" rel="noreferrer" style={{ marginLeft: 4 }}>
@@ -991,17 +1044,22 @@ export default function App() {
           <div style={{ marginTop: 12 }}>
             <strong style={{ fontSize: 14 }}>預設代理順序</strong>
             <ol style={{ margin: '0.4rem 0', paddingLeft: '1.25rem', fontSize: 12, color: '#444' }}>
-              {fallbackEndpoints.map((endpoint, index) => (
+              {defaultProxyOrder.map((endpoint, index) => (
                 <li key={`${endpoint.label || 'endpoint'}-${index}`}>{endpoint.label || '未命名代理'}</li>
               ))}
             </ol>
             <p style={{ fontSize: 12, color: '#666' }}>列表由程式自動輪詢，成功的代理會立即更新上方狀態。</p>
           </div>
+          <p style={{ fontSize: 12, color: '#444', marginTop: 8 }}>
+            預設會優先呼叫 <code>{proxyBase}</code>（可用 <code>VITE_CONCEPTNET_PROXY_BASE</code> 自訂域名）。
+            專案內已附 <code>api/conceptnet.js</code>，執行 <code>npm run proxy</code> 即可本地測試，再部署到 Vercel / Netlify
+            讓前端透過 <code>/api/conceptnet?term=…</code> 穩定轉傳 ConceptNet。
+          </p>
           <div style={{ marginTop: 12 }}>
             <strong style={{ fontSize: 14 }}>自訂代理（會優先於預設清單）</strong>
             <p style={{ fontSize: 12, color: '#444', margin: '0.35rem 0' }}>
-              模板可使用 <code>{'{{url}}'}</code>（原始 URL）或 <code>{'{{encodedUrl}}'}</code>（編碼後 URL）。例如：
-              <code>https://corsproxy.io/?{'{{url}}'}</code>
+              模板可使用 <code>{'{{url}}'}</code>、<code>{'{{encodedUrl}}'}</code>、<code>{'{{term}}'}</code> 或 <code>{'{{encodedTerm}}'}</code>
+              ，例如：<code>https://your-proxy.vercel.app/api/conceptnet?term={'{{encodedTerm}}'}</code>
             </p>
             {customProxyTemplates.length ? (
               <ul style={{ listStyle: 'none', padding: 0, margin: '0.25rem 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1030,7 +1088,7 @@ export default function App() {
               <textarea
                 value={proxyForm.template}
                 onChange={(e) => setProxyForm((prev) => ({ ...prev, template: e.target.value }))}
-                placeholder="輸入代理網址模板，例如：https://corsproxy.io/?{{url}}"
+                placeholder="輸入代理網址模板，例如：https://your-proxy.vercel.app/api/conceptnet?term={{encodedTerm}}"
                 rows={2}
                 style={{ padding: '0.4rem 0.6rem', borderRadius: 6, border: '1px solid #ddd', fontSize: 12 }}
               />
