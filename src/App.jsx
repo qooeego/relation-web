@@ -250,6 +250,7 @@ export default function App() {
   const [authNotice, setAuthNotice] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authForm, setAuthForm] = useState({ account: '', password: '', confirm: '' });
+  const [authMode, setAuthMode] = useState('login');
   const [customProxyTemplates, setCustomProxyTemplates] = useState(loadCustomProxyTemplates);
   const [proxyForm, setProxyForm] = useState({ label: '', template: '' });
   const [proxyNotice, setProxyNotice] = useState('');
@@ -332,22 +333,31 @@ export default function App() {
 
   const resetAuthForm = () => setAuthForm({ account: '', password: '', confirm: '' });
 
+  const switchAuthMode = (mode) => {
+    setAuthMode(mode);
+    setAuthNotice('');
+    if (mode === 'login') {
+      setAuthForm((prev) => ({ ...prev, confirm: '' }));
+    }
+  };
+
   const handleLocalAuth = (event) => {
     event?.preventDefault?.();
     const trimmedAccount = authForm.account.trim();
-    if (!trimmedAccount || !authForm.password || !authForm.confirm) {
-      setAuthNotice('請完整填寫帳號、密碼與確認密碼。');
-      return;
-    }
-    if (authForm.password !== authForm.confirm) {
-      setAuthNotice('密碼與確認密碼不一致。');
+    const requireConfirm = authMode === 'register';
+    if (!trimmedAccount || !authForm.password || (requireConfirm && !authForm.confirm)) {
+      setAuthNotice(requireConfirm ? '請完整填寫帳號、密碼與確認密碼。' : '請輸入帳號與密碼。');
       return;
     }
 
     const existingMembers = membersRef.current || {};
     const existing = existingMembers[trimmedAccount];
 
-    if (existing) {
+    if (authMode === 'login') {
+      if (!existing) {
+        setAuthNotice('尚未註冊，請先建立帳號。');
+        return;
+      }
       if (existing.password !== authForm.password) {
         setAuthNotice('密碼不正確，請再試一次。');
         return;
@@ -359,6 +369,14 @@ export default function App() {
       });
       setAuthNotice('登入成功，已記住此帳號。');
     } else {
+      if (authForm.password !== authForm.confirm) {
+        setAuthNotice('密碼與確認密碼不一致。');
+        return;
+      }
+      if (existing) {
+        setAuthNotice('此帳號已存在，請直接登入。');
+        return;
+      }
       const nextMembers = {
         ...existingMembers,
         [trimmedAccount]: {
@@ -1091,8 +1109,38 @@ export default function App() {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <p style={{ fontSize: 13, color: '#333', marginBottom: 0 }}>
-                  不想依賴第三方？直接建立站內帳號吧！只要填寫帳號、密碼與確認密碼，我們就會在本機瀏覽器記住你的會員資訊。
+                  不想依賴第三方？直接建立站內帳號吧！預設為「登入」模式，只需輸入帳號與密碼；切換到「註冊」後才會需要確認密碼。
                 </p>
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    background: '#f5f7fb',
+                    padding: 6,
+                    borderRadius: 999,
+                    fontSize: 13,
+                    fontWeight: 600
+                  }}
+                >
+                  {['login', 'register'].map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => switchAuthMode(mode)}
+                      style={{
+                        flex: 1,
+                        borderRadius: 999,
+                        border: 'none',
+                        padding: '6px 0',
+                        cursor: 'pointer',
+                        background: authMode === mode ? '#2c82c9' : 'transparent',
+                        color: authMode === mode ? '#fff' : '#2c82c9'
+                      }}
+                    >
+                      {mode === 'login' ? '我要登入' : '我要註冊'}
+                    </button>
+                  ))}
+                </div>
                 <form onSubmit={handleLocalAuth} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
                     帳號
@@ -1111,21 +1159,23 @@ export default function App() {
                       value={authForm.password}
                       onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
                       placeholder="輸入密碼"
-                      autoComplete="new-password"
+                      autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
                       style={{ padding: '0.5rem', borderRadius: 8, border: '1px solid #ccc' }}
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-                    確認密碼
-                    <input
-                      type="password"
-                      value={authForm.confirm}
-                      onChange={(e) => setAuthForm((prev) => ({ ...prev, confirm: e.target.value }))}
-                      placeholder="再次輸入密碼"
-                      autoComplete="new-password"
-                      style={{ padding: '0.5rem', borderRadius: 8, border: '1px solid #ccc' }}
-                    />
-                  </label>
+                  {authMode === 'register' && (
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                      確認密碼
+                      <input
+                        type="password"
+                        value={authForm.confirm}
+                        onChange={(e) => setAuthForm((prev) => ({ ...prev, confirm: e.target.value }))}
+                        placeholder="再次輸入密碼"
+                        autoComplete="new-password"
+                        style={{ padding: '0.5rem', borderRadius: 8, border: '1px solid #ccc' }}
+                      />
+                    </label>
+                  )}
                   <button
                     type="submit"
                     style={{
@@ -1138,7 +1188,7 @@ export default function App() {
                       cursor: 'pointer'
                     }}
                   >
-                    註冊 / 登入
+                    {authMode === 'login' ? '登入' : '註冊並登入'}
                   </button>
                 </form>
                 <p style={{ fontSize: 12, color: '#666', lineHeight: 1.6 }}>
