@@ -1,226 +1,183 @@
-import { useEffect, useRef, useState } from 'react';
-import ForceGraph2D from 'react-force-graph-2d';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import './App.css';
+
+const FILM_PRESETS = [
+  {
+    id: 'kodak-gold',
+    name: 'Kodak Gold',
+    description: '暖色、柔和高光',
+    videoFilter: 'saturate(1.15) contrast(1.08) brightness(1.04) sepia(0.14) hue-rotate(-6deg)',
+    grainOpacity: 0.1,
+    lightLeak: 'rgba(255, 166, 71, 0.15)'
+  },
+  {
+    id: 'fuji-superia',
+    name: 'Fuji Superia',
+    description: '偏綠調、街拍感',
+    videoFilter: 'saturate(1.08) contrast(1.13) brightness(1.02) hue-rotate(6deg)',
+    grainOpacity: 0.09,
+    lightLeak: 'rgba(145, 255, 184, 0.12)'
+  },
+  {
+    id: 'cinestill-800t',
+    name: 'CineStill 800T',
+    description: '夜景藍冷調',
+    videoFilter: 'saturate(1.05) contrast(1.16) brightness(0.94) hue-rotate(14deg)',
+    grainOpacity: 0.14,
+    lightLeak: 'rgba(62, 142, 255, 0.14)'
+  },
+  {
+    id: 'bw-classic',
+    name: 'B&W Classic',
+    description: '黑白銀鹽風格',
+    videoFilter: 'grayscale(1) contrast(1.2) brightness(1.05)',
+    grainOpacity: 0.12,
+    lightLeak: 'rgba(255, 255, 255, 0.05)'
+  }
+];
 
 export default function App() {
-  const [graphData, setGraphData] = useState({ nodes: [], links: [] });
-  const [keyword, setKeyword] = useState('狗');
-  const [loading, setLoading] = useState(false);
-  const [addMode, setAddMode] = useState(false);
-  const [inputPos, setInputPos] = useState({ x: window.innerWidth / 2 - 100, y: 150 });
-  const [inputValue, setInputValue] = useState('');
-  const [allLinks, setAllLinks] = useState([]);
-  const [history, setHistory] = useState([]);
-  const [showPanel, setShowPanel] = useState(false);
-  const fgRef = useRef();
-
-  const userData = useRef(JSON.parse(localStorage.getItem('userGraphData') || '{}'));
-  const deletedData = useRef(JSON.parse(localStorage.getItem('deletedGraphData') || '{}'));
-
-  const fetchGraph = async (centerWord) => {
-    setLoading(true);
-    try {
-      const res = await fetch(`https://api.conceptnet.io/c/zh/${encodeURIComponent(centerWord)}`);
-      const data = await res.json();
-
-      const customTerms = userData.current[centerWord] || [];
-      const deletedTerms = new Set(deletedData.current[centerWord] || []);
-
-      const relatedEdges = data.edges
-        .filter((edge) => {
-          const endLabel = edge.end?.label || edge.end?.term;
-          return (
-            endLabel &&
-            endLabel !== centerWord &&
-            /^[一-龥]+$/.test(endLabel) &&
-            !deletedTerms.has(endLabel)
-          );
-        })
-        .slice(0, 20);
-
-      const allRelated = Array.from(
-        new Set([
-          ...relatedEdges.map((e) => e.end?.label || e.end?.term),
-          ...customTerms
-        ])
-      ).filter((term) => !deletedTerms.has(term));
-
-      const newNodes = [
-        { id: centerWord, main: true },
-        ...allRelated.map((r) => ({ id: r }))
-      ];
-
-      const newLinks = [
-        ...relatedEdges.map((edge) => ({
-          source: centerWord,
-          target: edge.end?.label || edge.end?.term,
-          weight: Math.max(1, edge.weight * 2)
-        })),
-        ...customTerms
-          .filter((term) => !deletedTerms.has(term))
-          .map((term) => ({
-            source: centerWord,
-            target: term,
-            weight: 4
-          }))
-      ];
-
-      setGraphData({ nodes: newNodes, links: newLinks });
-      setAllLinks(allRelated);
-
-      if (fgRef.current) {
-        fgRef.current.d3ReheatSimulation();
-      }
-    } catch (e) {
-      console.error('探索失敗', e);
-    }
-    setLoading(false);
-  };
+  const videoRef = useRef(null);
+  const previewCanvasRef = useRef(null);
+  const captureCanvasRef = useRef(null);
+  const [activeFilm, setActiveFilm] = useState(FILM_PRESETS[0]);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [lastPhoto, setLastPhoto] = useState('');
 
   useEffect(() => {
-    fetchGraph(keyword);
+    let stream;
+
+    const initCamera = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        });
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          setCameraReady(true);
+        }
+      } catch (error) {
+        console.error(error);
+        setErrorMessage('相機啟動失敗，請確認瀏覽器已允許相機權限。');
+      }
+    };
+
+    initCamera();
+
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+    };
   }, []);
 
-  const handleClickNode = (node) => {
-    if (addMode) return;
-    setHistory((prev) => [...prev, keyword]);
-    fetchGraph(node.id);
-    setKeyword(node.id);
-  };
+  const filmFilter = useMemo(() => activeFilm.videoFilter, [activeFilm]);
 
-  const addCustomRelation = () => {
-    if (!inputValue.trim()) return;
-    const current = keyword;
-    const newTerm = inputValue.trim();
+  const paintFilmEffect = (ctx, width, height, preset) => {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
 
-    userData.current[current] = userData.current[current] || [];
-    if (!userData.current[current].includes(newTerm)) {
-      userData.current[current].push(newTerm);
+    for (let i = 0; i < data.length; i += 4) {
+      const grain = (Math.random() - 0.5) * 255 * preset.grainOpacity;
+      data[i] = Math.min(255, Math.max(0, data[i] + grain));
+      data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + grain));
+      data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + grain));
     }
-    localStorage.setItem('userGraphData', JSON.stringify(userData.current));
 
-    deletedData.current[current] = (deletedData.current[current] || []).filter(t => t !== newTerm);
-    localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
+    ctx.putImageData(imageData, 0, 0);
 
-    setInputValue('');
-    setAddMode(false);
-    setInputPos(null);
-    fetchGraph(current);
+    const leakGradient = ctx.createRadialGradient(width * 0.9, height * 0.05, 0, width * 0.9, height * 0.05, width * 0.8);
+    leakGradient.addColorStop(0, preset.lightLeak);
+    leakGradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+    ctx.fillStyle = leakGradient;
+    ctx.fillRect(0, 0, width, height);
   };
 
-  const deleteAnyRelation = (term) => {
-    const current = keyword;
-    deletedData.current[current] = deletedData.current[current] || [];
-    if (!deletedData.current[current].includes(term)) {
-      deletedData.current[current].push(term);
+  const capturePhoto = () => {
+    if (!videoRef.current || !captureCanvasRef.current) {
+      return;
     }
-    localStorage.setItem('deletedGraphData', JSON.stringify(deletedData.current));
 
-    fetchGraph(current);
+    const video = videoRef.current;
+    const canvas = captureCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      return;
+    }
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    ctx.filter = filmFilter;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    paintFilmEffect(ctx, canvas.width, canvas.height, activeFilm);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    setLastPhoto(dataUrl);
   };
 
-  const handleBack = () => {
-    if (history.length === 0) return;
-    const prev = [...history];
-    const last = prev.pop();
-    setHistory(prev);
-    setKeyword(last);
-    fetchGraph(last);
+  const downloadPhoto = () => {
+    if (!lastPhoto) return;
+
+    const link = document.createElement('a');
+    link.href = lastPhoto;
+    link.download = `film-camera-${activeFilm.id}-${Date.now()}.jpg`;
+    link.click();
   };
 
   return (
-    <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
-      <div style={{ position: 'absolute', zIndex: 1, top: 20, left: 20, display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-        <input
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          placeholder="輸入關鍵字"
-          style={{ fontSize: '1rem', padding: '0.5rem', border: '1px solid #ccc', borderRadius: '4px', outline: 'none' }}
-        />
-        <button
-          onClick={() => fetchGraph(keyword)}
-          style={{ padding: '0.5rem 1rem', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-        >探索</button>
-        <button
-          onClick={handleBack}
-          disabled={history.length === 0}
-          style={{ padding: '0.5rem 1rem', backgroundColor: history.length === 0 ? '#ccc' : '#2196F3', color: 'white', border: 'none', borderRadius: '4px', cursor: history.length === 0 ? 'not-allowed' : 'pointer' }}
-        >← 返回</button>
-        <button
-          onClick={() => setAddMode(true)}
-          style={{ padding: '0.5rem 1rem', backgroundColor: '#f39c12', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-        >➕ 新增關聯</button>
-        <button
-          onClick={() => setShowPanel(!showPanel)}
-          style={{ padding: '0.5rem 1rem', backgroundColor: '#888', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-        >{showPanel ? '▶️ 收起編輯區' : '📌 編輯區'}</button>
-      </div>
+    <main className="film-app">
+      <section className="camera-panel">
+        <h1>底片模擬相機</h1>
+        <p className="subtitle">已優先使用後鏡頭（Samsung S22+ 可直接測試）</p>
 
-      <ForceGraph2D
-        ref={fgRef}
-        graphData={graphData}
-        nodeLabel="id"
-        onNodeClick={handleClickNode}
-        linkDistance={(link) => 300 / Math.pow(link.weight || 1, 1.5)}
-        cooldownTicks={80}
-        enableNodeDrag
-        enableZoomInteraction
-        enablePanInteraction
-        d3Force="charge"
-        d3ForceConfig={{ charge: -250 }}
-        nodeCanvasObject={(node, ctx, globalScale) => {
-          try {
-            if (!node || node.x == null || node.y == null || isNaN(node.x) || isNaN(node.y)) return;
-            const label = node.id;
-            const fontSize = (node.main ? 16 : 12) / globalScale;
-            ctx.font = `${fontSize}px sans-serif`;
-            ctx.fillStyle = node.main ? 'red' : 'black';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(label, node.x, node.y);
-          } catch {}
-        }}
-        nodePointerAreaPaint={(node, color, ctx) => {
-          try {
-            if (!node || node.x == null || node.y == null || isNaN(node.x) || isNaN(node.y)) return;
-            ctx.fillStyle = color;
-            const size = node.main ? 20 : 10;
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
-            ctx.fill();
-          } catch {}
-        }}
-      />
-
-      {addMode && (
-        <input
-          style={{ position: 'absolute', left: inputPos.x, top: inputPos.y, fontSize: '16px', padding: '4px', zIndex: 10, border: '1px solid #ccc', borderRadius: '4px' }}
-          autoFocus
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') addCustomRelation(); }}
-          placeholder="輸入新詞按 Enter"
-        />
-      )}
-
-      {showPanel && (
-        <div style={{ position: 'absolute', top: 60, right: 0, width: '33vw', maxWidth: 300, background: '#fff', padding: 8, borderRadius: '8px 0 0 8px', maxHeight: '70vh', overflowY: 'auto', overflowX: 'auto' }}>
-          <strong>關鍵詞：</strong>{keyword}
-          <div style={{ marginTop: 8 }}>
-            {allLinks.map((term) => (
-              <div key={term} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                <span>{term}</span>
-                <button onClick={() => deleteAnyRelation(term)} style={{ marginLeft: 8 }}>🗑️</button>
-              </div>
-            ))}
-          </div>
+        <div className="camera-frame">
+          <video ref={videoRef} playsInline muted className="camera-view" style={{ filter: filmFilter }} />
+          <canvas ref={previewCanvasRef} className="hidden-canvas" aria-hidden="true" />
+          {!cameraReady && !errorMessage && <div className="status">啟動相機中...</div>}
+          {errorMessage && <div className="status error">{errorMessage}</div>}
         </div>
-      )}
 
-      <a
-        href="https://www.buymeacoffee.com/qooeego"
-        target="_blank"
-        style={{ position: 'absolute', bottom: 16, right: 16, textDecoration: 'none', fontSize: 16, fontWeight: 'bold', background: '#ffdd00', padding: '6px 12px', borderRadius: '6px', color: '#000' }}
-      >☕ Buy Me a Coffee</a>
-    </div>
+        <div className="film-row">
+          {FILM_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={`film-chip ${activeFilm.id === preset.id ? 'active' : ''}`}
+              onClick={() => setActiveFilm(preset)}
+            >
+              <strong>{preset.name}</strong>
+              <span>{preset.description}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="actions">
+          <button type="button" className="capture" onClick={capturePhoto} disabled={!cameraReady}>
+            拍照
+          </button>
+          <button type="button" className="download" onClick={downloadPhoto} disabled={!lastPhoto}>
+            下載照片
+          </button>
+        </div>
+      </section>
+
+      <section className="preview-panel">
+        <h2>最近拍攝</h2>
+        {lastPhoto ? <img src={lastPhoto} alt="最近拍攝成果" className="preview-image" /> : <p>還沒有照片，先拍一張吧。</p>}
+      </section>
+
+      <canvas ref={captureCanvasRef} className="hidden-canvas" aria-hidden="true" />
+    </main>
   );
 }

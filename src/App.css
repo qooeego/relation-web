@@ -1,42 +1,127 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+.film-app {
+  min-height: 100vh;
+  background: radial-gradient(circle at top, #2f2f2f 0%, #111 50%, #050505 100%);
+  color: #f6f1e9;
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1rem;
+  box-sizing: border-box;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.camera-panel,
+.preview-panel {
+  border: 1px solid #474747;
+  border-radius: 16px;
+  background: rgba(20, 20, 20, 0.92);
+  padding: 1rem;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
+h1,
+h2 {
+  margin: 0;
+}
+
+.subtitle {
+  margin-top: 0.5rem;
+  color: #c5bdaf;
+}
+
+.camera-frame {
+  margin-top: 1rem;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #000;
+}
+
+.camera-view {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 1rem;
+}
+
+.status.error {
+  color: #ff9f9f;
+}
+
+.film-row {
+  margin-top: 1rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.film-chip {
+  background: #232323;
+  border: 1px solid #454545;
+  color: #efe6d8;
+  border-radius: 12px;
+  padding: 0.6rem;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.film-chip span {
+  font-size: 0.78rem;
+  color: #cfc2b5;
+}
+
+.film-chip.active {
+  border-color: #f2c46c;
+  box-shadow: 0 0 0 1px #f2c46c;
+}
+
+.actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.capture,
+.download {
+  flex: 1;
+  border-radius: 999px;
+  border: none;
+  padding: 0.75rem;
+  font-size: 1rem;
+}
+
+.capture {
+  background: #f2c46c;
+  color: #1a1a1a;
+}
+
+.download {
+  background: #4f79ff;
+  color: white;
+}
+
+.preview-image {
+  width: 100%;
+  border-radius: 12px;
+  margin-top: 0.75rem;
+}
+
+.hidden-canvas {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .film-app {
+    grid-template-columns: 1fr;
   }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
-}
-
-.card {
-  padding: 2em;
-}
-
-.read-the-docs {
-  color: #888;
 }
