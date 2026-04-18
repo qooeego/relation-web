@@ -7,58 +7,41 @@
 - 拍照後套用顆粒與漏光效果
 - 匯出 JPG
 
-## 本機開發
+## 一鍵準備 Android 打包環境
 
 ```bash
-npm install
-npm run dev
+./scripts/package-apk.sh
 ```
 
-在手機測試時，請使用 HTTPS（相機 API 需要安全環境），或直接打包成 Android App。
+腳本會自動執行：
 
-## 打包成 Android APK（建議給 Samsung S22+）
+1. `npm install`
+2. `npm run build`
+3. 安裝 Capacitor 套件
+4. `npx cap init`（若尚未初始化）
+5. `npx cap add android`（若尚未建立 Android 平台）
+6. `npx cap sync android`
 
-1. 安裝依賴
+## 產出 APK（Samsung S22+）
 
-```bash
-npm install
-npm install @capacitor/core @capacitor/cli @capacitor/android
-```
-
-2. 建立前端產物
-
-```bash
-npm run build
-```
-
-3. 初始化 Capacitor（第一次）
-
-```bash
-npx cap init film.camera.app "Film Camera" --web-dir=dist
-```
-
-4. 新增 Android 平台
-
-```bash
-npx cap add android
-```
-
-5. 同步資源
-
-```bash
-npx cap sync android
-```
-
-6. 用 Android Studio 開啟並產出 APK
+腳本跑完後：
 
 ```bash
 npx cap open android
 ```
 
-之後在 Android Studio：
+接著在 Android Studio：
 
 - 選擇 `Build > Build Bundle(s) / APK(s) > Build APK(s)`
 - 安裝到 Samsung S22+ 測試
+
+## 若你在公司內網遇到 npm 403
+
+若安裝 `@capacitor/*` 出現 403（套件策略限制），請在可連到 npm registry 的網路環境執行 `./scripts/package-apk.sh`，或請管理員開放以下套件：
+
+- `@capacitor/core`
+- `@capacitor/cli`
+- `@capacitor/android`
 
 ## Samsung S22+ 測試建議
 
