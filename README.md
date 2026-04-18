@@ -1,12 +1,68 @@
-# React + Vite
+# Film Camera APK (Samsung S22+ 優先)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+這個專案是一個 React + Vite 底片模擬相機，提供：
 
-Currently, two official plugins are available:
+- 後鏡頭優先啟動（`facingMode: environment`）
+- 4 種底片風格（Kodak Gold / Fuji Superia / CineStill 800T / B&W）
+- 拍照後套用顆粒與漏光效果
+- 匯出 JPG
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 本機開發
 
-## Expanding the ESLint configuration
+```bash
+npm install
+npm run dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+在手機測試時，請使用 HTTPS（相機 API 需要安全環境），或直接打包成 Android App。
+
+## 打包成 Android APK（建議給 Samsung S22+）
+
+1. 安裝依賴
+
+```bash
+npm install
+npm install @capacitor/core @capacitor/cli @capacitor/android
+```
+
+2. 建立前端產物
+
+```bash
+npm run build
+```
+
+3. 初始化 Capacitor（第一次）
+
+```bash
+npx cap init film.camera.app "Film Camera" --web-dir=dist
+```
+
+4. 新增 Android 平台
+
+```bash
+npx cap add android
+```
+
+5. 同步資源
+
+```bash
+npx cap sync android
+```
+
+6. 用 Android Studio 開啟並產出 APK
+
+```bash
+npx cap open android
+```
+
+之後在 Android Studio：
+
+- 選擇 `Build > Build Bundle(s) / APK(s) > Build APK(s)`
+- 安裝到 Samsung S22+ 測試
+
+## Samsung S22+ 測試建議
+
+- Android 13/14 皆可
+- 首次開啟需允許相機權限
+- 建議使用後鏡頭主攝進行測試
+- 若畫面黑屏，確認其他 App 沒有占用相機
